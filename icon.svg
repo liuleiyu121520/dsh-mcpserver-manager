@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-label="MCP 服务器管理">
+  <rect x="6" y="10" width="52" height="44" rx="8" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M6 22h52" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="15" cy="16" r="2" fill="currentColor"/>
+  <circle cx="23" cy="16" r="2" fill="currentColor"/>
+  <path d="M17 33l5 5-5 5" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M31 43h16" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="44" cy="33" r="6" fill="none" stroke="currentColor" stroke-width="3"/>
+  <path d="M44 39v5" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+</svg>

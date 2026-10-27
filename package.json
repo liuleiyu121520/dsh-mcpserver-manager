@@ -1,0 +1,59 @@
+{
+  "name": "dsh-mcpserver-manager",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "在 DeepSeek Harness 设置里管理 MCP 服务器：粘贴一段 JSON → 双重校验 → 写入官方 cordis.patch.yml 的受管段，原子落盘、备份可回滚",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "mcp",
+    "model-context-protocol",
+    "cordis"
+  ],
+  "license": "MIT",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib/",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/liuleiyu121520/dsh-mcpserver-manager.git"
+  },
+  "homepage": "https://github.com/liuleiyu121520/dsh-mcpserver-manager",
+  "bugs": {
+    "url": "https://github.com/liuleiyu121520/dsh-mcpserver-manager/issues"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs --check",
+    "test": "node --test \"tests/**/*.test.js\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  }
+}

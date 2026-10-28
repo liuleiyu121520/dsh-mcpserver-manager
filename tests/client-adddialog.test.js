@@ -284,3 +284,86 @@ describe('client AddDialog · 粘贴 Claude 格式的真渲染', { skip: !hasEsb
     assert.equal(block[1].includes('--dsw-alias-bg-overlay'), false, '别再用会缺失的 bg-overlay');
   });
 });
+
+/** 编辑模式下 Host 下发的那份：非密钥字段照给，密钥值一律空串。 */
+const EDIT_TEXT = JSON.stringify(
+  {
+    serverName: 'remote',
+    transport: 'streamable-http',
+    url: 'https://a.example/mcp',
+    headers: { Authorization: '', 'x-other': '' },
+  },
+  null,
+  2,
+);
+
+describe('client AddDialog · 编辑模式', { skip: !hasEsbuild }, () => {
+  /** 编辑模式的统一 props。 */
+  const editProps = {
+    mode: 'edit',
+    serverName: 'remote',
+    initialText: EDIT_TEXT,
+    maskedKeys: ['Authorization', 'x-other'],
+    existingServerNames: [],
+    existingIds: [],
+    onSubmit: async () => {},
+    onCancel: () => {},
+  };
+
+  /** 载入组件。 */
+  const loadDialog = () => load("export { AddDialog } from '../src/client/AddDialog.jsx';", 'AddDialog');
+
+  it('标题是「编辑」、主按钮是「保存」，编辑器预填 Host 给的那份', async () => {
+    const { Component, hooks } = await loadDialog();
+    const tree = render(Component, editProps, hooks);
+    const shown = tree.texts.join(' | ');
+    assert.ok(shown.includes('编辑 MCP 服务器'), `标题没换成编辑：${shown}`);
+    assert.ok(shown.includes('正在编辑'), `没说是哪一条：${shown}`);
+    const editor = tree.elements.find((element) => element.props?.className === 'dshmcp-editor');
+    assert.equal(editor.props.value, EDIT_TEXT, '编辑框必须是这一条的配置，不能是示例');
+    const save = tree.elements.find(
+      (element) => element.type === 'button' && (element.children ?? []).some((child) => child === '保存'),
+    );
+    assert.ok(save !== undefined, `主按钮应该是「保存」：${shown}`);
+    assert.equal(save.props.disabled, false, '合法配置应该能直接保存');
+  });
+
+  it('不渲染「填入示例」（点一下就把用户的配置整段覆盖了）', async () => {
+    const { Component, hooks } = await loadDialog();
+    const tree = render(Component, editProps, hooks);
+    assert.equal(tree.elements.find((element) => element.type === 'select'), undefined);
+    assert.equal(tree.texts.join('|').includes('填入示例'), false);
+  });
+
+  it('说清「留空 = 沿用原密钥」，否则用户以为自己的 token 被删了', async () => {
+    const { Component, hooks } = await loadDialog();
+    const tree = render(Component, editProps, hooks);
+    const shown = tree.texts.join(' | ');
+    assert.ok(shown.includes('Authorization、x-other'), `要点名哪几个字段被隐藏了：${shown}`);
+    assert.ok(shown.includes('留空表示沿用原值'), `必须有这条约定：${shown}`);
+  });
+
+  it('没有密钥字段时说"没有"，而不是显示半句空话', async () => {
+    const { Component, hooks } = await loadDialog();
+    const tree = render(Component, { ...editProps, maskedKeys: [] }, hooks);
+    assert.ok(tree.texts.join('|').includes('本条目没有密钥字段'));
+  });
+
+  it('改名字时明确提示会替换掉原条目', async () => {
+    const { Component, hooks } = await loadDialog();
+    const renamed = JSON.stringify({ ...JSON.parse(EDIT_TEXT), serverName: 'remote2' }, null, 2);
+    const tree = paste(Component, editProps, hooks, renamed);
+    assert.ok(tree.texts.join(' | ').includes('改名会替换掉原条目'), tree.texts.join(' | '));
+  });
+
+  it('编辑态的空密钥能通过校验（空串是合法值，不是缺字段）', async () => {
+    const { Component, hooks } = await loadDialog();
+    const tree = render(Component, editProps, hooks);
+    const shown = tree.texts.join(' | ');
+    assert.equal(shown.includes('headers 必须是'), false, shown);
+    const save = tree.elements.find(
+      (element) => element.type === 'button' && (element.children ?? []).some((child) => child === '保存'),
+    );
+    assert.equal(save.props.disabled, false);
+  });
+});

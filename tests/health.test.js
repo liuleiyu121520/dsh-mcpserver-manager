@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { PROBE_TIMEOUT_MS, PROBE_PROTOCOL_VERSION, STATUS, checkServer, resolveCommand } from '../src/health.js';
 import { PLUGIN_VERSION } from '../src/version.js';
+import { healthSummary, healthView } from '../src/client/api.js';
 
 /**
  * 一条流式传输条目的默认形状。
@@ -118,7 +119,9 @@ describe('health · streamable-http 端点探测', () => {
     assert.equal(report.status, STATUS.DEGRADED);
     assert.equal(report.httpStatus, 401);
     assert.match(report.detail, /需要鉴权/);
-    assert.match(report.detail, /不携带配置里的密钥/);
+    assert.match(report.detail, /探测不带密钥/, '必须点明"没带密钥"，否则用户会以为自己的密钥失效了');
+    // 结论现在只走一行 toast，detail 必须短到放得下（卡片里那块长文案已删除）。
+    assert.ok(report.detail.length <= 48, `detail 太长，toast 里放不下：${report.detail}`);
   });
 
   it('404 → degraded，提示核对 streamable-http 地址', async () => {
@@ -230,5 +233,33 @@ describe('health · 报告形状稳定', () => {
     const report = await checkServer(httpItem({ transport: 'websocket', url: null }), { toolCount: 0 });
     assert.equal(report.status, STATUS.UNKNOWN);
     assert.match(report.detail, /不认识的传输方式/);
+  });
+});
+
+describe('healthSummary · 结论压成一行 toast', () => {
+  it('带上三档标签、耗时与原因', () => {
+    const text = healthSummary({ status: 'degraded', latencyMs: 132, detail: '服务可达，但需要鉴权（HTTP 401）' });
+    assert.equal(text, '需留意 · 132ms · 服务可达，但需要鉴权（HTTP 401）');
+  });
+
+  it('没有耗时就不写空档（不留"· ·"这种标点垃圾）', () => {
+    assert.equal(healthSummary({ status: 'healthy', latencyMs: null, detail: '已注册 3 个工具' }), '正常 · 已注册 3 个工具');
+  });
+
+  it('没有 detail 时只剩标签', () => {
+    assert.equal(healthSummary({ status: 'disabled', latencyMs: null, detail: '' }), '已停用');
+  });
+
+  it('不是报告就返回空串（调用方据此决定要不要弹）', () => {
+    assert.equal(healthSummary(null), '');
+    assert.equal(healthSummary(undefined), '');
+    assert.equal(healthSummary('x'), '');
+  });
+
+  it('三档标签仍然分得开（健康检查的语义没有被压缩掉）', () => {
+    assert.deepEqual(
+      ['healthy', 'degraded', 'unreachable', 'disabled', 'unknown'].map((status) => healthView(status).label),
+      ['正常', '需留意', '连不上', '已停用', '未知'],
+    );
   });
 });

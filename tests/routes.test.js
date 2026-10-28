@@ -303,6 +303,115 @@ describe('routes · 端点与信封', () => {
   });
 });
 
+describe('routes · 编辑（GET config / POST edit）', () => {
+  /**
+   * 造一条带密钥的远程条目，返回它的名字。
+   * @param {string} name serverName。
+   * @returns {Promise<string>} 名字。
+   */
+  const seedSecret = async (name) => {
+    const { statusCode } = await call(
+      'POST',
+      SERVERS_PATH,
+      JSON.stringify({
+        raw: JSON.stringify({
+          serverName: name,
+          transport: 'streamable-http',
+          url: 'https://a.example/mcp',
+          headers: { Authorization: 'Bearer sk-live-value' },
+        }),
+      }),
+    );
+    assert.equal(statusCode, 201);
+    return name;
+  };
+
+  it('GET /servers/<name>/config —— 200，密钥被置空（浏览器拿不到明文）', async () => {
+    const name = await seedSecret('cfg');
+    const { statusCode, payload } = await call('GET', `${SERVERS_PATH}/${name}/config`);
+    assert.equal(statusCode, 200);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.data.serverName, name);
+    assert.equal(payload.data.id, `mcp-${name}`);
+    assert.equal(payload.data.text.includes('sk-live-value'), false, '密钥绝不能下发');
+    assert.deepEqual(JSON.parse(payload.data.text).headers, { Authorization: '' });
+    assert.deepEqual(payload.data.maskedKeys, { headers: ['Authorization'] });
+  });
+
+  it('GET config 只接受 GET（写方法一律 405）', async () => {
+    const name = await seedSecret('cfg-method');
+    const { statusCode, payload } = await call('POST', `${SERVERS_PATH}/${name}/config`, '{}');
+    assert.equal(statusCode, 405);
+    assert.equal(payload.error.code, 'method-not-allowed');
+  });
+
+  it('POST /servers/<name>/edit —— 200，改 url 保留密钥（空串 = 沿用原值）', async () => {
+    const name = await seedSecret('edit-keep');
+    const source = await call('GET', `${SERVERS_PATH}/${name}/config`);
+    const edited = JSON.parse(source.payload.data.text);
+    edited.url = 'https://b.example/mcp';
+    const { statusCode, payload } = await call(
+      'POST',
+      `${SERVERS_PATH}/${name}/edit`,
+      JSON.stringify({ raw: JSON.stringify(edited) }),
+    );
+    assert.equal(statusCode, 200);
+    assert.equal(payload.data.renamed, false);
+    assert.equal(payload.data.item.url, 'https://b.example/mcp');
+    const text = readFileSync(filePath, 'utf8');
+    assert.ok(text.includes('sk-live-value'), '密钥必须还在（编辑不该把它清空）');
+    assert.ok(text.includes('https://b.example/mcp'));
+  });
+
+  it('POST edit 改名 —— renamed: true，列表里只剩新名字', async () => {
+    const name = await seedSecret('edit-old');
+    const source = await call('GET', `${SERVERS_PATH}/${name}/config`);
+    const edited = JSON.parse(source.payload.data.text);
+    edited.serverName = 'edit-new';
+    const { statusCode, payload } = await call(
+      'POST',
+      `${SERVERS_PATH}/${name}/edit`,
+      JSON.stringify({ raw: JSON.stringify(edited) }),
+    );
+    assert.equal(statusCode, 200);
+    assert.equal(payload.data.renamed, true);
+    assert.equal(payload.data.item.serverName, 'edit-new');
+    const list = await call('GET', SERVERS_PATH);
+    const names = list.payload.data.items.map((item) => item.serverName);
+    assert.ok(names.includes('edit-new'));
+    assert.equal(names.includes('edit-old'), false);
+  });
+
+  it('POST edit 缺 raw 字段 → 400 invalid-config（不猜、不写空配置）', async () => {
+    const name = await seedSecret('edit-nobody');
+    const { statusCode, payload } = await call('POST', `${SERVERS_PATH}/${name}/edit`, JSON.stringify({}));
+    assert.equal(statusCode, 400);
+    assert.equal(payload.error.code, 'invalid-config');
+  });
+
+  it('POST edit 校验不过 → 400，且原来的条目一个字都没动', async () => {
+    const name = await seedSecret('edit-invalid');
+    const before = readFileSync(filePath, 'utf8');
+    const { statusCode } = await call(
+      'POST',
+      `${SERVERS_PATH}/${name}/edit`,
+      JSON.stringify({ raw: JSON.stringify({ serverName: name, transport: 'streamable-http' }) }),
+    );
+    assert.equal(statusCode, 400);
+    assert.equal(readFileSync(filePath, 'utf8'), before, '被拒的编辑必须零副作用');
+  });
+
+  it('POST edit 打到不存在的名字 → 404 unknown-server', async () => {
+    const { statusCode, payload } = await call(
+      'POST',
+      `${SERVERS_PATH}/ghost/edit`,
+      JSON.stringify({ raw: rawFor('ghost') }),
+    );
+    assert.equal(statusCode, 404);
+    assert.equal(payload.error.code, 'unknown-server');
+  });
+});
+
 describe('routes · 只读条目与锚点损坏', () => {
   it('对段外（用户手写）条目删除 → 409 readonly-entry', async () => {
     const table = [];

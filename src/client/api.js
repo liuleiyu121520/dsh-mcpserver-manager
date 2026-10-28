@@ -86,6 +86,22 @@ export function healthView(status) {
 }
 
 /**
+ * 把一份健康报告压成一行 toast 文案。
+ *
+ * 卡片里不再渲染结论条（那是常驻的、挡视线的长文案），但"为什么是需留意"
+ * 这个信息不能丢——所以结论、耗时、detail 一起塞进这条一次性提示里。
+ * @param {object|null} report 健康报告。
+ * @returns {string} 一行文案（空串表示没有结论）。
+ */
+export function healthSummary(report) {
+  if (report === null || typeof report !== 'object') return '';
+  const label = healthView(report.status).label;
+  const latency = typeof report.latencyMs === 'number' ? ` · ${report.latencyMs}ms` : '';
+  const detail = typeof report.detail === 'string' ? report.detail : '';
+  return detail === '' ? `${label}${latency}` : `${label}${latency} · ${detail}`;
+}
+
+/**
  * 发一个请求并拆信封。
  *
  * @param {string} path 以 `/` 开头的路径。
@@ -167,6 +183,31 @@ export function toggleServer(serverName, enabled) {
   return request(`/servers/${encodeURIComponent(serverName)}/toggle`, {
     method: 'POST',
     body: JSON.stringify({ enabled }),
+  });
+}
+
+/**
+ * GET /servers/<name>/config —— 取一条条目的可编辑 JSON。
+ *
+ * `text` 里的 `env` / `headers` 值全部是空串（Host 绝不下发密钥），回填时
+ * 空串表示"沿用原值"（见 `patch-store.js` 的 `restoreSecretValues`）。
+ * @param {string} serverName 身份键。
+ * @returns {Promise<object>} `{serverName, id, transport, text, maskedKeys}`。
+ */
+export function readServerConfig(serverName) {
+  return request(`/servers/${encodeURIComponent(serverName)}/config`);
+}
+
+/**
+ * POST /servers/<name>/edit —— 用新 JSON 覆盖原条目。
+ * @param {string} serverName 原身份键。
+ * @param {string} raw 新的 JSON 文本。
+ * @returns {Promise<object>} `{item, renamed}`。
+ */
+export function editServer(serverName, raw) {
+  return request(`/servers/${encodeURIComponent(serverName)}/edit`, {
+    method: 'POST',
+    body: JSON.stringify({ raw }),
   });
 }
 

@@ -19,6 +19,7 @@ import {
   insertEntry,
   removeEntry,
   replaceEntry,
+  restoreSecretValues,
   scan,
 } from '../src/patch-store.js';
 import { MCP_CLIENT_NAME, serializeEntry } from '../src/serialize.js';
@@ -847,5 +848,211 @@ describe('patch-store · Claude 格式落盘（{ mcpServers: { … } }）', () =
       (error) => error.code === 'invalid-config',
     );
     assert.equal(fs.readFileSync(path, 'utf8'), initial);
+  });
+});
+
+describe('patch-store · 编辑（configSource / replace）', () => {
+  /** 一条带密钥的远程条目。 */
+  const secretConfig = (overrides = {}) => ({
+    serverName: 'remote',
+    transport: 'streamable-http',
+    url: 'https://a.example/mcp',
+    headers: { Authorization: 'Bearer sk-secret-value', 'x-other': 'plain' },
+    ...overrides,
+  });
+
+  /** 建一个只有一条 remote 的 store。 */
+  const withRemote = async () => {
+    const ctx = storeOn(`# patch\n${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await ctx.store.add(JSON.stringify(secretConfig()));
+    return ctx;
+  };
+
+  it('configSource 下发的是空值：只有键名，没有密钥', async () => {
+    const { store } = await withRemote();
+    const source = await store.configSource('remote');
+    assert.equal(source.serverName, 'remote');
+    assert.equal(source.id, 'mcp-remote');
+    assert.equal(source.text.includes('sk-secret-value'), false, '密钥绝不能下发到浏览器');
+    assert.equal(source.text.includes('plain'), false, 'headers 里任何值都不能漏');
+    const parsed = JSON.parse(source.text);
+    assert.deepEqual(parsed.headers, { Authorization: '', 'x-other': '' });
+    assert.deepEqual(source.maskedKeys, { headers: ['Authorization', 'x-other'] });
+    assert.equal(parsed.url, 'https://a.example/mcp', '非密钥字段必须原样给回来');
+  });
+
+  it('configSource 的 text 能直接回喂校验（编辑框里那份就是合法的提交体）', async () => {
+    const { store } = await withRemote();
+    const source = await store.configSource('remote');
+    const { validateServerInput } = await import('../src/validate.js');
+    const result = validateServerInput(source.text, { existingServerNames: [], existingIds: [] });
+    assert.equal(result.ok, true, JSON.stringify(result.issues));
+  });
+
+  it('只改 url：留空的密钥被还原，明文仍在文件里（不是被空串覆盖）', async () => {
+    const { store, fs, path } = await withRemote();
+    const source = await store.configSource('remote');
+    const edited = JSON.parse(source.text);
+    edited.url = 'https://b.example/mcp';
+    const result = await store.replace('remote', JSON.stringify(edited));
+    assert.equal(result.renamed, false);
+    const text = fs.files.get(path);
+    assert.ok(text.includes('Bearer sk-secret-value'), '空串 = 沿用原值，密钥必须还在');
+    assert.ok(text.includes('https://b.example/mcp'));
+    assert.equal((await store.read()).items.length, 1, '不能变成两条');
+  });
+
+  it('填了新密钥：新值生效（旧值不许盖回来）', async () => {
+    const { store, fs, path } = await withRemote();
+    const source = await store.configSource('remote');
+    const edited = JSON.parse(source.text);
+    edited.headers.Authorization = 'Bearer sk-brand-new';
+    await store.replace('remote', JSON.stringify(edited));
+    const text = fs.files.get(path);
+    assert.ok(text.includes('Bearer sk-brand-new'));
+    assert.equal(text.includes('sk-secret-value'), false, '旧密钥必须被替换掉');
+  });
+
+  it('把整个密钥键删掉：真的删掉，不会被"还原"救回来', async () => {
+    const { store, fs, path } = await withRemote();
+    const source = await store.configSource('remote');
+    const edited = JSON.parse(source.text);
+    delete edited.headers;
+    await store.replace('remote', JSON.stringify(edited));
+    const text = fs.files.get(path);
+    assert.equal(text.includes('Authorization'), false);
+    assert.equal((await store.read()).items[0].headerKeys.length, 0);
+  });
+
+  it('改名：旧名消失、新名出现，id 跟着改（不是留下两条）', async () => {
+    const { store } = await withRemote();
+    const source = await store.configSource('remote');
+    const edited = JSON.parse(source.text);
+    edited.serverName = 'renamed';
+    const result = await store.replace('remote', JSON.stringify(edited));
+    assert.equal(result.renamed, true);
+    assert.equal(result.item.serverName, 'renamed');
+    assert.equal(result.item.id, 'mcp-renamed');
+    const names = (await store.read()).items.map((entry) => entry.serverName);
+    assert.deepEqual(names, ['renamed']);
+  });
+
+  it('新配置没提 disabled：沿用原停用状态（改个 url 不会顺手把它启用）', async () => {
+    const { store } = await withRemote();
+    await store.setEnabled('remote', false);
+    const source = await store.configSource('remote');
+    const edited = JSON.parse(source.text);
+    edited.url = 'https://c.example/mcp';
+    await store.replace('remote', JSON.stringify(edited));
+    assert.equal((await store.read()).items[0].enabled, false, '停用状态必须保住');
+  });
+
+  it('新配置里写了 disabled: false：以用户写的为准', async () => {
+    const { store } = await withRemote();
+    await store.setEnabled('remote', false);
+    const source = await store.configSource('remote');
+    const edited = JSON.parse(source.text);
+    edited.disabled = false;
+    await store.replace('remote', JSON.stringify(edited));
+    assert.equal((await store.read()).items[0].enabled, true);
+  });
+
+  it('env 里的 !!js 表达式：编辑后仍不加引号（加了引号表达式就静默失效）', async () => {
+    const { store, fs, path } = storeOn(`# patch\n${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(
+      JSON.stringify({
+        serverName: 'stdio-x',
+        transport: 'stdio',
+        command: 'npx',
+        env: { GITHUB_TOKEN: '!!js process.env.GITHUB_TOKEN', PLAIN: 'sk-plain' },
+      }),
+    );
+    const source = await store.configSource('stdio-x');
+    const edited = JSON.parse(source.text);
+    // 两个密钥字段都被置空——包括那个表达式。
+    assert.deepEqual(edited.env, { GITHUB_TOKEN: '', PLAIN: '' });
+    edited.args = ['-y', 'other-pkg'];
+    await store.replace('stdio-x', JSON.stringify(edited));
+    const text = fs.files.get(path);
+    assert.ok(
+      text.includes('GITHUB_TOKEN: !!js process.env.GITHUB_TOKEN'),
+      `表达式必须原样输出（不加引号），实际：\n${text}`,
+    );
+    assert.equal(text.includes('"!!js'), false, '被引号包住就变成字面量了，用户的 process.env 会失效');
+    assert.ok(text.includes('sk-plain'), '留空的明文密钥要被还原，不能丢');
+    assert.ok(text.includes('other-pkg'));
+  });
+
+  it('段外（用户手写）条目：configSource 与 replace 都拒绝，且不动文件', async () => {
+    const hand = [
+      '# 手写',
+      '- id: mcp-hand',
+      `  name: "${MCP_CLIENT_NAME}"`,
+      '  config:',
+      '    serverName: hand',
+      '    transport: stdio',
+      '    command: node',
+      '',
+    ].join('\n');
+    const { store, fs, path } = storeOn(hand);
+    const before = fs.files.get(path);
+    await assert.rejects(() => store.configSource('hand'), (error) => error.code === 'readonly-entry');
+    await assert.rejects(
+      () => store.replace('hand', configJson('hand')),
+      (error) => error.code === 'readonly-entry',
+    );
+    assert.equal(fs.files.get(path), before, '被拒的编辑一个字节都不该动');
+  });
+
+  it('不存在的名字：unknown-server', async () => {
+    const { store } = await withRemote();
+    await assert.rejects(() => store.configSource('nope'), (error) => error.code === 'unknown-server');
+    await assert.rejects(() => store.replace('nope', configJson('nope')), (error) => error.code === 'unknown-server');
+  });
+
+  it('改名撞上别人的名字：duplicate-server（摘自己 ≠ 谁都能过）', async () => {
+    const { store } = storeOn(`# patch\n${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(configJson('a'));
+    await store.add(configJson('b'));
+    const source = await store.configSource('b');
+    const edited = JSON.parse(source.text);
+    edited.serverName = 'a';
+    await assert.rejects(
+      () => store.replace('b', JSON.stringify(edited)),
+      (error) => error.code === 'duplicate-server',
+    );
+  });
+
+  it('编辑后 read() 的快照里仍然没有明文（parsed 是不可枚举属性）', async () => {
+    const { store, path } = await withRemote();
+    const snapshot = await store.read();
+    const item = snapshot.items[0];
+    assert.equal(JSON.stringify(snapshot).includes('sk-secret-value'), false, '快照不能带明文');
+    assert.equal(JSON.stringify(item).includes('sk-secret-value'), false, 'item 序列化也不能带明文');
+    assert.deepEqual({ ...item }.parsed, undefined, '对象展开也要拿不到 parsed');
+    assert.equal(typeof item.parsed, 'object', '显式读取才拿得到（configSource 需要）');
+    // 保险丝的另一半：文件里必须还有明文，否则"编辑一次就丢密钥"（见上面
+    // 「只改 url」那条）。这里只确认快照这条路径是干净的。
+    assert.ok(path.endsWith('cordis.patch.yml'));
+  });
+});
+
+describe('patch-store · restoreSecretValues（纯函数）', () => {
+  it('空串 + 原值非空字符串 → 还原；其它一概不碰', () => {
+    const next = { env: { A: '', B: '', C: 'new', D: 'kept' }, headers: { H: '' } };
+    const previous = { env: { A: 'old-a', B: 42, C: 'old-c', D: 'old-d' }, headers: { H: 'old-h' } };
+    const merged = restoreSecretValues(next, previous);
+    assert.equal(merged.env.A, 'old-a', '空串才还原');
+    assert.equal(merged.env.B, '', '原值不是字符串就一律不还原（数字/布尔不是密钥）');
+    assert.equal(merged.env.C, 'new', '用户填了就用用户的');
+    assert.equal(merged.env.D, 'kept');
+    assert.equal(merged.headers.H, 'old-h');
+    assert.equal(next.env.A, '', '入参不能被原地改写');
+  });
+
+  it('原值为 null / 缺键时什么都不还原', () => {
+    const merged = restoreSecretValues({ env: { A: '' } }, { env: {} });
+    assert.equal(merged.env.A, '');
+    assert.deepEqual(restoreSecretValues({ env: { A: '' } }, null), { env: { A: '' } });
   });
 });

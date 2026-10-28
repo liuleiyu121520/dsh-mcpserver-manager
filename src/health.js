@@ -121,13 +121,13 @@ function classifyHttpStatus(status) {
   if (status === 401 || status === 403) {
     return {
       status: STATUS.DEGRADED,
-      detail: `服务可达，但需要鉴权（HTTP ${status}）：探测不携带配置里的密钥，请在对话里试调用任一工具确认密钥有效`,
+      detail: `服务可达，但需要鉴权（HTTP ${status}）：探测不带密钥，请让模型调一次工具确认`,
     };
   }
   if (status === 404 || status === 405) {
     return {
       status: STATUS.DEGRADED,
-      detail: `地址可达，但没有 MCP 接口（HTTP ${status}）：请核对该服务的 streamable-http 地址`,
+      detail: `地址可达，但没有 MCP 接口（HTTP ${status}），请核对 streamable-http 地址`,
     };
   }
   if (status >= 500) {
@@ -201,7 +201,7 @@ async function probeHttp(item, { fetchImpl, timeoutMs, logger }) {
     if (verdict !== null) return { ...verdict, httpStatus: response.status, latencyMs };
     return {
       status: STATUS.DEGRADED,
-      detail: `端点有响应（HTTP ${response.status} · ${latencyMs}ms），但没有注册任何工具：检查 DSH 日志里的连接与 tools/list 记录`,
+      detail: `端点有响应（HTTP ${response.status}），但没有注册任何工具`,
       httpStatus: response.status,
       latencyMs,
     };
@@ -239,7 +239,7 @@ function probeCommand(item, env) {
   if (resolved === null) {
     return {
       status: STATUS.UNREACHABLE,
-      detail: `在 PATH 里找不到命令 ${item.command}：先确认它已安装，或用绝对路径`,
+      detail: `在 PATH 里找不到命令 ${item.command}，先确认它已安装`,
     };
   }
   if (typeof item.cwd === 'string' && item.cwd !== '' && !existsSync(item.cwd)) {
@@ -247,7 +247,7 @@ function probeCommand(item, env) {
   }
   return {
     status: STATUS.DEGRADED,
-    detail: `命令存在（${resolved}），但没有注册任何工具：多半是启动失败或鉴权未通过，看 DSH 日志里该服务器的 stderr`,
+    detail: `命令存在（${resolved}），但没有注册任何工具`,
   };
 }
 

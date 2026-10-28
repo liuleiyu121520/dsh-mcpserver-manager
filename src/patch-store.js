@@ -22,6 +22,7 @@ import { normalizeConfig } from './config.js';
 import { resolveHomeDir, resolvePatchTarget, toDisplayPath } from './paths.js';
 import {
   MCP_CLIENT_NAME,
+  SECRET_KEYS,
   detectNewline,
   parseFlowMap,
   parseFlowSeq,
@@ -347,7 +348,7 @@ export function parseItem(lines, span, anchor, newline = '\n') {
   if (transport === 'streamable-http') summary = url ?? '';
   else if (command !== null) summary = [command, ...args].join(' ').trim();
 
-  return {
+  const item = {
     id: extractId(lines, span),
     serverName,
     transport,
@@ -366,6 +367,14 @@ export function parseItem(lines, span, anchor, newline = '\n') {
     disabledBy,
     span: { start: span.start, end: span.end },
   };
+  // 原始 config 对象（**含 env / headers 明文**）只挂在**不可枚举**属性上。
+  //
+  // 为什么这么绕：编辑功能需要把整条 config 还原成 JSON 交给前端改，而快照
+  // 是要经 HTTP 下发到浏览器的。不可枚举是这里唯一可靠的保险丝——`JSON.stringify`
+  // 跳过它、对象展开（`{...item}`）也跳过它，所以任何"顺手把 item 传出去"的
+  // 代码都不会泄漏明文，只有显式读 `item.parsed` 的 `configSource()` 拿得到。
+  Object.defineProperty(item, 'parsed', { value: config, enumerable: false });
+  return item;
 }
 
 /**
@@ -432,6 +441,42 @@ export function ensureBlock(text) {
 }
 
 /**
+ * 把编辑框里留空的密钥换回原值。
+ *
+ * 编辑的语义难点在于「密钥从不回显」：`configSource()` 下发的是 `env`/`headers`
+ * 的**键名**加上空串值，所以用户在编辑框里看到 `"x-litellm-api-key": ""`。
+ * 如果原样写盘，密钥就被空串覆盖了——那不是"没改"，那是**改坏了**。
+ *
+ * 约定因此很直白：**空串 = 沿用原值**。想换密钥就填新的，想删掉就把整个键删掉
+ * （键没了就不会被还原）。这条约定必须写进界面提示，否则就是给用户埋雷。
+ *
+ * @param {Record<string, unknown>} clientConfig 校验后的新 config（浅拷贝后再改）。
+ * @param {Record<string, unknown>|null} previous 条目原有的 config。
+ * @returns {Record<string, unknown>} 合并后的 config。
+ */
+export function restoreSecretValues(clientConfig, previous) {
+  const out = { ...clientConfig };
+  if (previous === null || typeof previous !== 'object') return out;
+  for (const key of SECRET_KEYS) {
+    const next = out[key];
+    const before = previous[key];
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) continue;
+    if (before === null || typeof before !== 'object' || Array.isArray(before)) continue;
+    /** @type {Record<string, unknown>} */
+    const merged = { ...next };
+    for (const [name, value] of Object.entries(merged)) {
+      // 只认"空串 + 原值是非空字符串"：数字/布尔/`!!js` 都不该被悄悄替换，
+      // 而 `!!js process.env.X` 本来就是表达式，用户删了它就是想删。
+      if (value === '' && typeof before[name] === 'string' && before[name] !== '') {
+        merged[name] = before[name];
+      }
+    }
+    out[key] = merged;
+  }
+  return out;
+}
+
+/**
  * 在受管段末尾追加一条（段不存在则先建段）。
  * @param {string} text 文件全文。
  * @param {string[]} entryLines 条目行（不含换行符）。
@@ -467,7 +512,7 @@ export function removeEntry(text, serverName) {
 }
 
 /**
- * 替换受管段内同名条目（P1-1 编辑用；P0 已实现，路由未暴露）。
+ * 替换受管段内同名条目（编辑用）。
  * @param {string} text 文件全文。
  * @param {string} serverName 身份键。
  * @param {string[]} entryLines 新条目行。
@@ -777,27 +822,7 @@ export function createPatchStore(options = {}) {
     mutate((text) => {
       const scanned = scan(text);
       requireHealthyAnchors(scanned);
-      const result = validateServerInput(raw, {
-        existingServerNames: scanned.items
-          .map((item) => item.serverName)
-          .filter((name) => typeof name === 'string'),
-        existingIds: scanned.ids,
-      });
-      if (result.ok !== true || result.value === null) {
-        const codes = new Set(result.issues.map((item) => item.code));
-        const code = codes.has('E_JSON')
-          ? 'invalid-json'
-          : codes.has('E_DUP')
-            ? 'duplicate-server'
-            : 'invalid-config';
-        const error = codedError(code, result.issues[0]?.message ?? '配置校验未通过');
-        error.errors = result.issues;
-        throw error;
-      }
-      const serverName = String(result.value.serverName);
-      // `disabled` 是**条目级**键，不是 MCP 客户端 config 里的字段：留着会被
-      // 序列化成 `config.disabled`，cordis 看不见、等于白写。所以在这里提出来。
-      const { disabled, ...clientConfig } = result.value;
+      const { disabled, clientConfig, serverName } = validateOrThrow(raw, scanned);
       const entry = {
         id: `mcp-${serverName}`,
         name: MCP_CLIENT_NAME,
@@ -810,6 +835,127 @@ export function createPatchStore(options = {}) {
       if (disabled === true) insertedDisabled.add(serverName);
       const item = scan(next).items.find((entry2) => entry2.serverName === serverName) ?? null;
       return { next, payload: { item } };
+    });
+
+  /**
+   * 校验一段配置文本，不通过就抛带错误码的异常。
+   *
+   * `self` 是"正在编辑的那条自己"：新增时为 undefined（占用集合就是全文件），
+   * 编辑时要把它从**已占用**里摘掉——否则"只改了个 url、名字没动"会被自己的
+   * 名字判成重名。
+   *
+   * @param {string} raw 配置文本。
+   * @param {ReturnType<typeof scan>} scanned 当前文件扫描结果。
+   * @param {object|null} [self] 正在编辑的条目。
+   * @returns {{disabled: unknown, clientConfig: Record<string, unknown>, serverName: string}} 校验产物。
+   */
+  const validateOrThrow = (raw, scanned, self = null) => {
+    const selfName = self !== null ? self.serverName : null;
+    const result = validateServerInput(raw, {
+      existingServerNames: scanned.items
+        .map((item) => item.serverName)
+        .filter((name) => typeof name === 'string' && name !== selfName),
+      existingIds: scanned.ids.filter((id) => (self !== null ? id !== self.id : true)),
+    });
+    if (result.ok !== true || result.value === null) {
+      const codes = new Set(result.issues.map((item) => item.code));
+      const code = codes.has('E_JSON')
+        ? 'invalid-json'
+        : codes.has('E_DUP')
+          ? 'duplicate-server'
+          : 'invalid-config';
+      const error = codedError(code, result.issues[0]?.message ?? '配置校验未通过');
+      error.errors = result.issues;
+      throw error;
+    }
+    // `disabled` 是**条目级**键，不是 MCP 客户端 config 里的字段：留着会被
+    // 序列化成 `config.disabled`，cordis 看不见、等于白写。所以在这里提出来。
+    const { disabled, ...clientConfig } = result.value;
+    return { disabled, clientConfig, serverName: String(result.value.serverName) };
+  };
+
+  /**
+   * 读一条条目的可编辑 JSON（**密钥被替换成空串**）。
+   *
+   * 这是编辑功能唯一会碰明文的地方，也是唯一不把明文发出去的地方：`env` /
+   * `headers` 的值在这里被换成 `''`，前端拿到的只是"有哪些键"。
+   *
+   * @param {string} serverName 身份键。
+   * @returns {Promise<object>} `{serverName, id, transport, text, maskedKeys}`。
+   */
+  const configSource = async (serverName) => {
+    const before = readState();
+    const scanned = scan(before.text);
+    const target = scanned.items.find((item) => item.serverName === serverName);
+    if (target === undefined) throw codedError('unknown-server', '该条目已不存在，请刷新列表');
+    if (target.managed !== true) throw codedError('readonly-entry', '该条目非本插件管理，无法修改');
+    if (target.parsable !== true) {
+      throw codedError('unparsable-entry', '该条目格式超出可解析范围，请手工编辑配置文件');
+    }
+    const source = target.parsed !== null && typeof target.parsed === 'object' ? target.parsed : {};
+    /** @type {Record<string, string[]>} */
+    const maskedKeys = {};
+    /** @type {Record<string, unknown>} */
+    const masked = {};
+    for (const [key, value] of Object.entries(source)) {
+      if (
+        SECRET_KEYS.includes(key) &&
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value)
+      ) {
+        const names = Object.keys(value);
+        maskedKeys[key] = names;
+        masked[key] = Object.fromEntries(names.map((name) => [name, '']));
+      } else {
+        masked[key] = value;
+      }
+    }
+    return {
+      serverName,
+      id: target.id,
+      transport: target.transport,
+      text: JSON.stringify(masked, null, 2),
+      maskedKeys,
+    };
+  };
+
+  /**
+   * 替换一条已存在的条目（编辑）。
+   *
+   * 三件与"新增"不同的事：
+   * 1. 唯一性判定要摘掉自己（见 `validateOrThrow` 的 `self`）；
+   * 2. 留空的密钥要还原成原值（见 `restoreSecretValues`）；
+   * 3. **没提到 `disabled` 时沿用原来的启停状态**——否则"改个 url"会顺手把一条
+   *    停用的服务器悄悄启用，而用户根本没动那个开关。
+   *
+   * @param {string} serverName 原身份键。
+   * @param {string} raw 新配置文本。
+   * @returns {Promise<object>} `{item, renamed, revision, checksum}`。
+   */
+  const replace = async (serverName, raw) =>
+    mutate((text) => {
+      const scanned = scan(text);
+      requireHealthyAnchors(scanned);
+      const target = requireWritable(scanned, serverName);
+      const { disabled, clientConfig, serverName: nextName } = validateOrThrow(raw, scanned, target);
+      const merged = restoreSecretValues(clientConfig, target.parsed ?? null);
+      // `disabled` 没出现在新配置里 → 沿用原状态；出现了 → 以用户写的为准。
+      const keepDisabled = disabled === undefined ? target.enabled !== true : disabled === true;
+      const entry = {
+        id: `mcp-${nextName}`,
+        name: MCP_CLIENT_NAME,
+        disabled: keepDisabled,
+        config: merged,
+      };
+      const next = replaceEntry(text, serverName, serializeEntry(entry));
+      if (next === null) throw codedError('unknown-server', '该条目已不存在，请刷新列表');
+      // `disabled` 行的归属记账跟着条目走：旧名字上的记录作废，新名字按"原来
+      // 有没有这个键"重新记——否则改名后"启用"会写回一行 `disabled: false`。
+      insertedDisabled.delete(serverName);
+      if (keepDisabled && target.disabledBy === null) insertedDisabled.add(nextName);
+      const item = scan(next).items.find((entry2) => entry2.serverName === nextName) ?? null;
+      return { next, payload: { item, renamed: nextName !== serverName } };
     });
 
   /**
@@ -865,6 +1011,8 @@ export function createPatchStore(options = {}) {
   return {
     read,
     add,
+    replace,
+    configSource,
     remove,
     setEnabled,
     filePath,

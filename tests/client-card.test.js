@@ -3,7 +3,8 @@
  *
  * 守的全是"用户看得见、点得着"的东西：
  * 1. 启停是**开关**（`role="switch"` + `aria-checked`），不是文字按钮；
- * 2. 每个条目都有**健康检查按钮**，点完结论落在卡片里（而不是只弹一句 toast）；
+ * 2. 每个条目都有**健康检查按钮**，点完把结论交给上层（卡片里**不留**常驻文案）；
+ *    菜单里有「编辑」，点页面其他区域菜单要能关掉；
  * 3. 工具数就在行上，点开才去取详情，展开能看到具体工具名；
  * 4. 旧 Host（没有 `toolCount`）不渲染工具区——**不显示一个"共 0 个工具"的假结论**；
  * 5. 只读条目没有开关也没有菜单，但健康检查与工具列表照旧可用（那是读操作）。
@@ -64,6 +65,17 @@ const report = {
 const find = (tree, predicate) => tree.elements.find(predicate);
 
 /**
+ * 取一个元素自己的文字（只看直接子节点里的字符串）。
+ *
+ * 菜单项的文字是原生子节点而不是 `tree.texts`——`tree.texts` 是全树的，没法
+ * 用来区分"哪一个按钮"。
+ * @param {any} element 元素。
+ * @returns {string} 文字。
+ */
+const labelOf = (element) =>
+  Array.isArray(element.children) ? element.children.filter((child) => typeof child === 'string').join('') : '';
+
+/**
  * 找 `role="switch"` 的开关。
  * @param {{elements: any[]}} tree 树。
  * @returns {any|undefined} 元素。
@@ -103,7 +115,7 @@ describe('client ServerCard · 开关与健康检查', { skip: !hasEsbuild }, ()
     assert.deepEqual(toggles, [['github', true]]);
   });
 
-  it('健康检查按钮点完，结论落在卡片里（含耗时）', async () => {
+  it('健康检查点一下就把结论交给上层，卡片里不留常驻文案', async () => {
     const { Component, hooks } = await load();
     /** @type {string[]} */
     const asked = [];
@@ -121,18 +133,19 @@ describe('client ServerCard · 开关与健康检查', { skip: !hasEsbuild }, ()
     assert.ok(button !== undefined, '每个条目都该有健康检查按钮');
     await button.props.onClick();
     tree = render(Component, props, hooks);
-    assert.deepEqual(asked, ['github']);
+    assert.deepEqual(asked, ['github'], '结论必须交出去（上层负责 toast）');
     const shown = tree.texts.join('');
-    assert.ok(shown.includes('健康检查 · 正常'), `缺结论行：${shown}`);
-    assert.ok(shown.includes('12ms'), `缺耗时：${shown}`);
-    assert.ok(shown.includes('已注册 3 个工具'), `缺原因：${shown}`);
-    assert.ok(
-      find(tree, (element) => element.props?.className === 'dshmcp-health is-ok') !== undefined,
-      '正常要用 is-ok（绿色条），不能跟"连不上"一个色',
+    assert.ok(!shown.includes('健康检查 ·'), `卡片里不该再出现结论行：${shown}`);
+    assert.ok(!shown.includes('12ms'), `耗时也不该留在卡片里：${shown}`);
+    assert.ok(!shown.includes('已注册 3 个工具'), `原因交给 toast，别占三行：${shown}`);
+    assert.equal(
+      find(tree, (element) => String(element.props?.className ?? '').includes('dshmcp-health')),
+      undefined,
+      '结论条已删除，任何情况下都不该渲染出来',
     );
   });
 
-  it('健康检查失败（返回 null）时不会插入一个空结论行', async () => {
+  it('健康检查返回 null（失败）时也不会凭空多出一块结论区', async () => {
     const { Component, hooks } = await load();
     const props = { item: item(), onToggle: () => {}, onRemove: () => {}, onHealth: async () => null };
     let tree = render(Component, props, hooks);
@@ -140,6 +153,56 @@ describe('client ServerCard · 开关与健康检查', { skip: !hasEsbuild }, ()
     await button.props.onClick();
     tree = render(Component, props, hooks);
     assert.equal(find(tree, (element) => String(element.props?.className ?? '').includes('dshmcp-health')), undefined);
+  });
+});
+
+describe('client ServerCard · 更多操作菜单', { skip: !hasEsbuild }, () => {
+  /** 打开 ⋯ 菜单后的树。 */
+  const openMenu = async () => {
+    const { Component, hooks } = await load();
+    /** @type {Array<[string, string]>} */
+    const edits = [];
+    const props = {
+      item: item(),
+      onToggle: () => {},
+      onRemove: () => {},
+      onEdit: (name) => edits.push(['edit', name]),
+      onHealth: async () => null,
+    };
+    let tree = render(Component, props, hooks);
+    find(tree, (element) => element.props?.['aria-label'] === '更多操作').props.onClick();
+    tree = render(Component, props, hooks);
+    return { tree, edits, props, Component, hooks };
+  };
+
+  it('菜单里有「编辑」，点了把名字交给上层', async () => {
+    const { tree, edits } = await openMenu();
+    const edit = find(
+      tree,
+      (element) => element.type === 'button' && element.props?.className === 'dshmcp-menu-item' && labelOf(element) === '编辑',
+    );
+    assert.ok(edit !== undefined, '已添加的 MCP 必须能编辑（这一条是用户反馈的核心）');
+    edit.props.onClick();
+    assert.deepEqual(edits, [['edit', 'github']]);
+  });
+
+  it('点菜单外的任何地方都关得掉：有一块全屏垫层接管点击', async () => {
+    const { tree } = await openMenu();
+    const backdrop = find(tree, (element) => element.props?.className === 'dshmcp-menu-backdrop');
+    assert.ok(backdrop !== undefined, '没有垫层就只能在点同一个按钮时才关得上');
+    // 垫层自己不该渲染出任何内容（它是透明的）。
+    assert.deepEqual(backdrop.children, []);
+    assert.equal(backdrop.props.onClick(), undefined);
+  });
+
+  it('只读条目连菜单都没有（不能编辑就别让人看见入口）', async () => {
+    const { Component, hooks } = await load();
+    const tree = render(
+      Component,
+      { item: item({ managed: false }), onToggle: () => {}, onRemove: () => {}, onEdit: () => {} },
+      hooks,
+    );
+    assert.equal(find(tree, (element) => element.props?.['aria-label'] === '更多操作'), undefined);
   });
 });
 

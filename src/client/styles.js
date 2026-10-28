@@ -32,6 +32,9 @@ export const CSS = `
   color: var(--dsw-alias-label-primary-foreground, #ffffff);
 }
 .dshmcp-btn:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover, #1d4ed8); }
+/* 按下时缩一点：本地请求几十毫秒就结束，没有这一下"我按到了"的触感，
+   图标按钮看起来就像没反应。 */
+.dshmcp-btn:active:not(:disabled) { transform: scale(0.94); }
 .dshmcp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .dshmcp-btn.is-secondary {
   background: var(--dsw-alias-bg-layer-3, #f3f4f6);
@@ -97,6 +100,12 @@ export const CSS = `
 .dshmcp-meta-item { display: inline-flex; align-items: center; gap: 4px; }
 .dshmcp-mask { letter-spacing: 1px; }
 
+/*
+ * 菜单垫层：透明的全屏层，点页面任何地方都能把菜单关掉。
+ * z-index 比菜单小一档、比页面大——点菜单项时接的是菜单自己，点外面时接的是
+ * 它。这样就不必在 document 上挂 mousedown 监听，也就不依赖事件冒泡时序。
+ */
+.dshmcp-menu-backdrop { position: fixed; inset: 0; z-index: 9; }
 .dshmcp-menu {
   position: absolute; right: 0; top: 32px; z-index: 10; min-width: 144px;
   padding: 4px; border-radius: 8px;
@@ -149,6 +158,7 @@ export const CSS = `
 .dshmcp-dialog-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 24px; }
 .dshmcp-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .dshmcp-field-label { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary, #4b5563); }
+.dshmcp-field-note { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #6b7280); }
 
 .dshmcp-editor {
   width: 100%; min-height: 200px; padding: 12px; border: none; border-radius: 8px; resize: vertical;
@@ -245,22 +255,6 @@ export const CSS = `
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 
-/* 健康检查结论：左侧色条区分三档，"需留意"和"连不上"必须一眼分得开。 */
-.dshmcp-health {
-  display: flex; align-items: flex-start; gap: 8px; margin-top: 12px;
-  padding: 8px 12px; border-radius: 8px;
-  font-size: 11px; line-height: 16px;
-  background: var(--dsw-alias-bg-layer-1, #f9fafb);
-  border-left: 3px solid var(--dsw-alias-label-dimmed, #9ca3af);
-  color: var(--dsw-alias-label-secondary, #4b5563);
-}
-.dshmcp-health.is-ok { border-left-color: var(--dsw-alias-state-success-primary, #16a34a); }
-.dshmcp-health.is-warn { border-left-color: var(--dsw-alias-state-warning-primary, #d97706); }
-.dshmcp-health.is-bad { border-left-color: var(--dsw-alias-state-error-primary, #dc2626); }
-.dshmcp-health.is-off { border-left-color: var(--dsw-alias-label-dimmed, #9ca3af); }
-.dshmcp-health-title { flex: 0 0 auto; font-weight: 600; }
-.dshmcp-health-detail { flex: 1 1 auto; min-width: 0; color: var(--dsw-alias-label-tertiary, #6b7280); }
-
 /* 有新版横幅：中性样式而不是错误红——"有新版本"不是故障。 */
 .dshmcp-banner.is-update {
   color: var(--dsw-alias-label-primary, #1f2328);
@@ -270,6 +264,9 @@ export const CSS = `
 /* 操作结果提示：底部居中，短、可读、自己消失，不需要用户关。 */
 .dshmcp-toast {
   position: fixed; left: 50%; bottom: 24px; z-index: 60;
+  /* 纯提示，不该抢走底下按钮的点击——一个盖住页面的 toast 就是新的
+     "点了没反应"。 */
+  pointer-events: none;
   max-width: calc(100vw - 48px); padding: 8px 16px; border-radius: 8px;
   transform: translateX(-50%);
   font-size: 12px; line-height: 18px; font-family: var(--dsw-font-family, inherit);

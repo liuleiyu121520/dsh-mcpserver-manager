@@ -1,11 +1,18 @@
 /**
- * 添加 MCP 弹窗：JSON 编辑器 + 示例下拉 + 解析结果行 + 实时错误区。
+ * 添加 / 编辑 MCP 弹窗：JSON 编辑器 + 示例下拉 + 解析结果行 + 实时错误区。
  *
  * 校验用的是 `../validate.js` —— **与 Host 后端同一个文件**（esbuild 把它内联
  * 进本 bundle），所以"前端判过的后端一定判过"，不存在两份规则漂移。
  *
  * 示例默认给 Claude / Cursor 那种 `{ "mcpServers": { … } }` 形状：用户从各家
  * 文档复制过来的基本都是它，第一屏就给对形状，比让他先踩一次错更省事。
+ *
+ * **编辑模式**（`mode: 'edit'`）的三处不同，都是为了不误导人：
+ * 1. 示例下拉不渲染——点一下就把用户自己的配置整段覆盖掉，是个纯陷阱；
+ * 2. 密钥值是**空串**（Host 从不下发密钥），提示行必须说清"留空 = 沿用原值"，
+ *    否则用户会以为自己的 token 被删了；
+ * 3. 唯一性校验要排除自己（由调用方过滤 `existingServerNames`），不然"只改 url"
+ *    会被判成重名。
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { validateServerInput } from '../validate.js';
@@ -62,6 +69,10 @@ const SAMPLES = Object.freeze([
 
 /**
  * @param {object} props 属性。
+ * @param {'create'|'edit'} [props.mode] 模式。
+ * @param {string} [props.serverName] 编辑模式下正在改的名字。
+ * @param {string} [props.initialText] 编辑模式下的初始 JSON（Host 已把密钥置空）。
+ * @param {string[]} [props.maskedKeys] 被置空的密钥字段名。
  * @param {string[]} [props.existingServerNames] 已占用的 serverName。
  * @param {string[]} [props.existingIds] 已占用的条目 id。
  * @param {boolean} [props.staleHost] 运行中的 Host 是不是旧版本。
@@ -70,13 +81,18 @@ const SAMPLES = Object.freeze([
  * @returns {JSX.Element} 弹窗。
  */
 export function AddDialog({
+  mode = 'create',
+  serverName = '',
+  initialText = '',
+  maskedKeys = [],
   existingServerNames = [],
   existingIds = [],
   staleHost = false,
   onSubmit,
   onCancel,
 }) {
-  const [text, setText] = useState(SAMPLES[0].value);
+  const editing = mode === 'edit';
+  const [text, setText] = useState(editing && initialText !== '' ? initialText : SAMPLES[0].value);
   const [submitting, setSubmitting] = useState(false);
   const [remoteError, setRemoteError] = useState('');
 
@@ -87,6 +103,7 @@ export function AddDialog({
   const issues = result.issues.filter((issue) => issue.level === 'error' || issue.level === 'warn');
   const canSubmit = result.ok === true && submitting === false;
   const parsed = result.ok === true && result.value !== null ? result.value : null;
+  const masked = Array.isArray(maskedKeys) ? maskedKeys : [];
 
   // 切换示例时清掉上一次的远端错误，避免旧报错一直挂着。
   useEffect(() => {
@@ -114,7 +131,7 @@ export function AddDialog({
     <div className="dshmcp-mask-layer" role="dialog" aria-modal="true">
       <div className="dshmcp-dialog">
         <div className="dshmcp-dialog-head">
-          <h3 className="dshmcp-dialog-title">添加 MCP 服务器</h3>
+          <h3 className="dshmcp-dialog-title">{editing ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
           <button type="button" className="dshmcp-btn is-ghost" onClick={onCancel} aria-label="关闭">
             ✕
           </button>
@@ -122,21 +139,27 @@ export function AddDialog({
         <div className="dshmcp-dialog-body">
           <div className="dshmcp-field">
             <span className="dshmcp-field-label">JSON 配置</span>
-            <select
-              className="dshmcp-select"
-              value=""
-              onChange={(event) => {
-                const sample = SAMPLES.find((item) => item.label === event.target.value);
-                if (sample !== undefined) setText(sample.value);
-              }}
-            >
-              <option value="">填入示例 ▾</option>
-              {SAMPLES.map((sample) => (
-                <option key={sample.label} value={sample.label}>
-                  {sample.label}
-                </option>
-              ))}
-            </select>
+            {editing ? (
+              <span className="dshmcp-field-note">
+                正在编辑 <span className="dshmcp-path">{serverName}</span>
+              </span>
+            ) : (
+              <select
+                className="dshmcp-select"
+                value=""
+                onChange={(event) => {
+                  const sample = SAMPLES.find((item) => item.label === event.target.value);
+                  if (sample !== undefined) setText(sample.value);
+                }}
+              >
+                <option value="">填入示例 ▾</option>
+                {SAMPLES.map((sample) => (
+                  <option key={sample.label} value={sample.label}>
+                    {sample.label}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <textarea
             className="dshmcp-editor"
@@ -183,6 +206,18 @@ export function AddDialog({
               <span>
                 将写入 <span className="dshmcp-path">{parsed.serverName}</span> · {parsed.transport}
                 {parsed.disabled === true ? ' · 默认停用' : ''}
+                {editing && parsed.serverName !== serverName ? ' · 改名会替换掉原条目' : ''}
+              </span>
+            </div>
+          )}
+
+          {editing === false ? null : (
+            <div className="dshmcp-hint">
+              <span className="dshmcp-hint-icon">
+                <InfoIcon />
+              </span>
+              <span>
+                {masked.length === 0 ? '本条目没有密钥字段。' : `${masked.join('、')} 的值已隐藏，留空表示沿用原值。`}
               </span>
             </div>
           )}
@@ -192,7 +227,7 @@ export function AddDialog({
             取消
           </button>
           <button type="button" className="dshmcp-btn" onClick={submit} disabled={!canSubmit}>
-            {submitting ? '提交中…' : '确定'}
+            {submitting ? '提交中…' : editing ? '保存' : '确定'}
           </button>
         </div>
       </div>

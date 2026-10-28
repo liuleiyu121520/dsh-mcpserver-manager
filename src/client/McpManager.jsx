@@ -14,11 +14,13 @@ import {
   checkUpdateState,
   createServer,
   dismissUpdate,
+  editServer,
   getUpdateState,
-  healthView,
+  healthSummary,
   listServerTools,
   listServers,
   messageFor,
+  readServerConfig,
   readUpgradeState,
   removeServer,
   toggleServer,
@@ -40,6 +42,14 @@ const TOAST_MS = 3200;
 
 /** 升级轮询上限：150 次 × 1s。装包（pnpm）在慢网下可能要几分钟。 */
 const UPGRADE_POLL_LIMIT = 150;
+
+/**
+ * 刷新图标的最短旋转时长（毫秒）。
+ *
+ * 读一个几 KB 的本地文件只要几毫秒，请求一结束图标就归位——用户看到的
+ * "什么都没发生"。给一个下限，让"点到了、正在读、读完了"这件事有可见的过程。
+ */
+const MIN_SPIN_MS = 450;
 
 /**
  * 升级失败码 → 一句人话。
@@ -67,6 +77,7 @@ export function McpManager() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [pendingRemove, setPendingRemove] = useState('');
   const [toast, setToast] = useState(null);
   const [update, setUpdate] = useState(null);
@@ -82,20 +93,37 @@ export function McpManager() {
 
   /**
    * 拉取列表。
+   *
+   * `announce` 只在**用户自己按了刷新**时为 true：首屏加载、增删改之后的重拉
+   * 都各有各的提示，再补一条"已刷新"就是噪音。而用户按了按钮必须有回音——
+   * 本地文件几毫秒就读完，没有 toast 的话这一下看起来就是"按钮没反应"。
+   *
+   * @param {boolean} [announce] 是否用 toast 说出结果。
    * @returns {Promise<void>} 完成即 resolve。
    */
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (announce = false) => {
     setBusy(true);
     setRefreshing(true);
+    const startedAt = Date.now();
     try {
       const data = await listServers();
       setSnapshot(data);
       setLoadError('');
       setPhase('ready');
+      if (announce === true) {
+        const count = Array.isArray(data?.items) ? data.items.length : 0;
+        setToast({ text: count === 0 ? '已刷新 · 还没有 MCP 服务器' : `已刷新 · 共 ${count} 个服务器` });
+      }
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error));
       setPhase('error');
     } finally {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_SPIN_MS && typeof setTimeout === 'function') {
+        await new Promise((resolve) => {
+          setTimeout(resolve, MIN_SPIN_MS - elapsed);
+        });
+      }
       setBusy(false);
       setRefreshing(false);
     }
@@ -172,7 +200,7 @@ export function McpManager() {
     const data = await createServer(raw);
     setAdding(false);
     setBanner('');
-    await refresh();
+    await refresh(false);
     const added = data.item !== null && typeof data.item === 'object' ? data.item : null;
     if (added === null) return;
     const addedName = typeof added.serverName === 'string' ? added.serverName : '';
@@ -191,7 +219,7 @@ export function McpManager() {
       await removeServer(serverName);
       setPendingRemove('');
       setBanner('');
-      await refresh();
+      await refresh(false);
       notify(`已删除 ${serverName}`);
     } catch (error) {
       showError(error);
@@ -211,7 +239,7 @@ export function McpManager() {
     try {
       await toggleServer(serverName, enabled);
       setBanner('');
-      await refresh();
+      await refresh(false);
       // 启停要重启宿主才真正生效（cordis 的 disabled 由加载器读），
       // 这句话必须说，否则用户会以为开关坏了。
       notify(`${serverName} 已${enabled === true ? '启用' : '停用'}，重启 DSH 后生效`);
@@ -232,13 +260,60 @@ export function McpManager() {
       const data = await checkServerHealth(serverName);
       const report = data.report ?? null;
       if (report !== null) {
-        notify(`${serverName} 健康检查：${healthView(report.status).label}`);
+        const summary = healthSummary(report);
+        notify(`${serverName} · ${summary === '' ? '检查完成' : summary}`);
       }
       return report;
     } catch (error) {
       showError(error);
       return null;
     }
+  };
+
+  /**
+   * 打开编辑弹窗：先把该条目的 JSON 拉回来（密钥已由 Host 置空）。
+   * @param {string} serverName 名称。
+   * @returns {Promise<void>} 完成即 resolve。
+   */
+  const onEdit = async (serverName) => {
+    setBusy(true);
+    try {
+      const source = await readServerConfig(serverName);
+      const masked =
+        source !== null && typeof source.maskedKeys === 'object' && source.maskedKeys !== null
+          ? Object.values(source.maskedKeys)
+              .flat()
+              .filter((key) => typeof key === 'string')
+          : [];
+      setBanner('');
+      setEditing({
+        serverName,
+        text: typeof source.text === 'string' ? source.text : '',
+        maskedKeys: masked,
+      });
+    } catch (error) {
+      // 只读 / 不可解析条目的入口本来就不渲染，走到这里说明文件在这期间变了
+      // ——提示"刷新后重试"比弹一个空编辑器有用。
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * 提交编辑。
+   * @param {string} raw 新配置文本。
+   * @returns {Promise<void>} 完成即 resolve；抛错时弹窗保持打开。
+   */
+  const onEditSubmit = async (raw) => {
+    const original = editing === null ? '' : editing.serverName;
+    const data = await editServer(original, raw);
+    setEditing(null);
+    setBanner('');
+    await refresh();
+    const savedName = typeof data?.item?.serverName === 'string' ? data.item.serverName : original;
+    setHighlighted(savedName);
+    notify(data?.renamed === true ? `已保存，并改名为 ${savedName}` : `已保存 ${savedName}`);
   };
 
   /**
@@ -359,7 +434,7 @@ export function McpManager() {
           setBanner('');
           setAdding(true);
         }}
-        onRefresh={refresh}
+        onRefresh={() => refresh(true)}
         onCheckUpdate={onCheckUpdate}
       />
 
@@ -412,7 +487,7 @@ export function McpManager() {
             <div>{banner}</div>
             <div className="dshmcp-banner-note">配置文件未被破坏，可重试或刷新后重来。</div>
           </div>
-          <button type="button" className="dshmcp-btn is-secondary" onClick={refresh}>
+          <button type="button" className="dshmcp-btn is-secondary" onClick={() => refresh(false)}>
             重试
           </button>
           <button type="button" className="dshmcp-btn is-ghost" onClick={() => setBanner('')} aria-label="关闭提示">
@@ -448,7 +523,7 @@ export function McpManager() {
             <div>加载失败：{loadError}</div>
             <div className="dshmcp-banner-note">页面不会卡在加载态，可直接重试。</div>
           </div>
-          <button type="button" className="dshmcp-btn is-secondary" onClick={refresh}>
+          <button type="button" className="dshmcp-btn is-secondary" onClick={() => refresh(false)}>
             重试
           </button>
         </div>
@@ -470,6 +545,7 @@ export function McpManager() {
           busy={busy}
           onToggle={onToggle}
           onRemove={setPendingRemove}
+          onEdit={onEdit}
           onHealth={onHealth}
           onLoadTools={onLoadTools}
         />
@@ -482,6 +558,31 @@ export function McpManager() {
           staleHost={staleHost}
           onSubmit={onAdd}
           onCancel={() => setAdding(false)}
+        />
+      ) : null}
+
+      {/*
+        编辑弹窗。两处与"新增"不同，都在这一层算好再传下去：
+        - `key` 逼一次重挂载：改另一条时 hook 槽位必须清空，否则编辑器里还留着
+          上一条的文本；
+        - 唯一性校验要摘掉自己，否则"只改 url"会被自己的名字判成重名。
+      */}
+      {editing !== null ? (
+        <AddDialog
+          key={`edit:${editing.serverName}`}
+          mode="edit"
+          serverName={editing.serverName}
+          initialText={editing.text}
+          maskedKeys={editing.maskedKeys}
+          existingServerNames={(Array.isArray(taken.serverNames) ? taken.serverNames : []).filter(
+            (name) => name !== editing.serverName,
+          )}
+          existingIds={(Array.isArray(taken.ids) ? taken.ids : []).filter(
+            (id) => id !== `mcp-${editing.serverName}`,
+          )}
+          staleHost={staleHost}
+          onSubmit={onEditSubmit}
+          onCancel={() => setEditing(null)}
         />
       ) : null}
 

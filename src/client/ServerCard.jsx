@@ -2,14 +2,17 @@
  * 单张 MCP 卡片。
  *
  * 信息层次（从上到下）：状态点 + 名称 + 传输/停用 chip → 命令行 → 环境/请求头/
- * 超时 → 工具列表（可展开）→ 健康检查结论。
+ * 超时 → 工具列表（可展开）。
  *
  * 只读条目（`managed:false`）不渲染任何写操作入口——能看见但点不动的操作比
  * 没有更糟，所以开关与菜单直接不渲染。健康检查与工具列表**照旧可用**：那是
  * 读操作，对用户手写的条目一样有价值。
+ *
+ * 健康检查的结论**不在卡片里留痕**：那一块常驻的长文案（结论 + 耗时 + 一段
+ * 解释）在列表里占掉三行，而它只在点下去的那一刻有用。结论改走 toast，卡片
+ * 只保留那个心跳按钮本身。
  */
 import React, { useState } from 'react';
-import { healthView } from './api.js';
 import { ChevronIcon, MoreIcon, PulseIcon } from './Icons.jsx';
 import { Switch } from './Switch.jsx';
 
@@ -45,6 +48,7 @@ function emptyToolNote(item, catalog) {
  * @param {boolean} [props.busy] 是否有操作进行中。
  * @param {(name: string, enabled: boolean) => void} props.onToggle 启停。
  * @param {(name: string) => void} props.onRemove 删除。
+ * @param {(name: string) => void} props.onEdit 编辑。
  * @param {(name: string) => Promise<object|null>} props.onHealth 健康检查。
  * @param {(name: string) => Promise<object|null>} props.onLoadTools 读工具表。
  * @returns {JSX.Element} 卡片。
@@ -54,6 +58,7 @@ export function ServerCard({
   highlighted = false,
   onToggle,
   onRemove,
+  onEdit,
   onHealth,
   onLoadTools,
   busy = false,
@@ -62,7 +67,6 @@ export function ServerCard({
   const [toolsOpen, setToolsOpen] = useState(false);
   const [catalog, setCatalog] = useState(null);
   const [toolsLoading, setToolsLoading] = useState(false);
-  const [health, setHealth] = useState(null);
   const [checking, setChecking] = useState(false);
 
   const name = typeof item.serverName === 'string' && item.serverName !== '' ? item.serverName : '（无法解析）';
@@ -78,7 +82,6 @@ export function ServerCard({
   // 旧版 Host 不会带这两个字段：toolCount 为 null 时整块工具区不渲染，
   // 而不是显示一个"共 0 个工具"的假结论。
   const toolCount = typeof item.toolCount === 'number' ? item.toolCount : null;
-  const view = health === null ? null : healthView(health.status);
 
   /**
    * 关闭菜单并执行动作。
@@ -110,14 +113,14 @@ export function ServerCard({
   };
 
   /**
-   * 跑一次健康检查。
+   * 跑一次健康检查。结论由上层弹 toast，这里只管"正在查"这一件事。
    * @returns {Promise<void>} 完成即 resolve。
    */
   const runHealth = async () => {
     if (checking === true || typeof onHealth !== 'function') return;
     setChecking(true);
     try {
-      setHealth(await onHealth(name));
+      await onHealth(name);
     } finally {
       setChecking(false);
     }
@@ -166,8 +169,22 @@ export function ServerCard({
             >
               <MoreIcon />
             </button>
+            {/* 透明垫层：点页面任何地方都关菜单。
+                用垫层而不是 document 上的 mousedown 监听，是因为它**不依赖
+                事件时序与冒泡**——点菜单项时垫层在下面、点外面时它接到，
+                两条路径互不干扰，也不用担心 SSR / 测试环境里没有 document。 */}
+            {menuOpen ? (
+              <div
+                className="dshmcp-menu-backdrop"
+                onClick={() => setMenuOpen(false)}
+                aria-hidden="true"
+              />
+            ) : null}
             {menuOpen ? (
               <div className="dshmcp-menu">
+                <button type="button" className="dshmcp-menu-item" onClick={() => run(() => onEdit(name))}>
+                  编辑
+                </button>
                 <button
                   type="button"
                   className="dshmcp-menu-item"
@@ -255,16 +272,6 @@ export function ServerCard({
               ))}
             </div>
           )}
-        </div>
-      )}
-
-      {health === null || view === null ? null : (
-        <div className={`dshmcp-health ${view.className}`}>
-          <span className="dshmcp-health-title">
-            健康检查 · {view.label}
-            {typeof health.latencyMs === 'number' ? ` · ${health.latencyMs}ms` : ''}
-          </span>
-          <span className="dshmcp-health-detail">{health.detail}</span>
         </div>
       )}
     </div>

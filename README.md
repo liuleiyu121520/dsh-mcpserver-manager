@@ -24,6 +24,18 @@
 
 ## 界面
 
+<img src="docs/screenshots/list.png" width="820" alt="MCP 管理列表：三张卡片分别是 deepwiki（streamable-http、4 个工具）、github（stdio、26 个工具）与已停用的 postgres；每张卡片右侧是健康检查图标、启停开关与⋯菜单">
+
+**列表**——状态点、`serverName`、传输方式 chip、命令行，一行「环境 / 请求头 / 超时」，行尾「共 N 个工具」。停用的条目置灰并标「已停用」。
+
+<img src="docs/screenshots/tools.png" width="820" alt="展开 deepwiki 后列出 4 个工具：ask_question、read_wiki_structure、read_wiki_contents、search，各带参数个数与描述">
+
+**展开工具**——点开才去拉详情（工具名、参数个数、描述），收起不重查。工具名取自宿主 `ctx.tools` 里的 `mcp__<serverName>__` 命名空间，所以看到的就是宿主**真实注册**的结果。
+
+<img src="docs/screenshots/add.png" width="820" alt="添加 MCP 服务器弹窗：等宽 JSON 编辑器里是 mcpServers 配置，下方一条黄色提示说未写传输方式、按 command 推断为 stdio，再下面一行说将写入 sentry · stdio">
+
+**添加**——粘贴 JSON，边打字边校验；底部一行直接告诉你这条会写到哪、按什么传输方式：`将写入 sentry · stdio`。
+
 - **列表页**：标题 + 一句副标题（后面跟着版本号，**点它手动检查更新**）；**列表为空时右上角什么都不渲染**（空态卡片里已经有一个「添加 MCP」，刷新一个空列表也不会带来任何变化）。每张卡片显示状态点、serverName、传输方式 chip、命令行（过长单行截断、悬浮看全量）、环境/请求头 key 与超时
 - **刷新有反馈**：图标在加载时**转起来**（至少 450ms，否则本地文件几毫秒读完，动画根本来不及出现）并 `aria-busy` 标记，结束后弹一条「已刷新 · 共 N 个服务器」——不会出现"点了不知道有没有发生"的静默
 - **操作结果都有提示**（新增 / 编辑 / 删除 / 启停 / 健康检查 / 更新），**页面上方**居中的 toast，3.2 秒自动消失（贴着上半屏的操作入口出现，视线不用走一整屏），不需要手动关（toast 设了 `pointer-events: none`，绝不挡下面的按钮）

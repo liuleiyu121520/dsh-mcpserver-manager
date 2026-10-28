@@ -1,31 +1,52 @@
 /**
- * 添加 MCP 弹窗：JSON 编辑器 + 示例下拉 + 实时错误区 + 写入位置提示。
+ * 添加 MCP 弹窗：JSON 编辑器 + 示例下拉 + 解析结果行 + 实时错误区。
  *
  * 校验用的是 `../validate.js` —— **与 Host 后端同一个文件**（esbuild 把它内联
  * 进本 bundle），所以"前端判过的后端一定判过"，不存在两份规则漂移。
+ *
+ * 示例默认给 Claude / Cursor 那种 `{ "mcpServers": { … } }` 形状：用户从各家
+ * 文档复制过来的基本都是它，第一屏就给对形状，比让他先踩一次错更省事。
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { validateServerInput } from '../validate.js';
 import { InfoIcon, WarningIcon } from './Icons.jsx';
 
-/** 两套示例（stdio / streamable-http），与官方配置格式 1:1。 */
+/** 三套示例，覆盖最常见来源。 */
 const SAMPLES = Object.freeze([
   Object.freeze({
-    label: 'stdio（本地命令）',
+    label: 'Claude / Cursor · 本地命令',
     value: JSON.stringify(
       {
-        serverName: 'github',
-        transport: 'stdio',
-        command: 'npx',
-        args: ['-y', '@modelcontextprotocol/server-github'],
-        env: { GITHUB_TOKEN: '!!js process.env.GITHUB_TOKEN' },
+        mcpServers: {
+          github: {
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+            env: { GITHUB_TOKEN: '!!js process.env.GITHUB_TOKEN' },
+          },
+        },
       },
       null,
       2,
     ),
   }),
   Object.freeze({
-    label: 'streamable-http（远程服务）',
+    label: 'Claude / Cursor · 远程服务',
+    value: JSON.stringify(
+      {
+        mcpServers: {
+          remote: {
+            type: 'http',
+            url: 'https://example.com/mcp',
+            headers: { Authorization: 'Bearer your-token' },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  }),
+  Object.freeze({
+    label: 'DSH 原生写法',
     value: JSON.stringify(
       {
         serverName: 'remote',
@@ -41,14 +62,13 @@ const SAMPLES = Object.freeze([
 
 /**
  * @param {object} props 属性。
- * @param {string} [props.fileDisplay] 配置文件展示路径。
  * @param {string[]} [props.existingServerNames] 已占用的 serverName。
  * @param {string[]} [props.existingIds] 已占用的条目 id。
  * @param {(raw: string) => Promise<void>} props.onSubmit 提交；抛错时弹窗保持打开。
  * @param {() => void} props.onCancel 取消。
  * @returns {JSX.Element} 弹窗。
  */
-export function AddDialog({ fileDisplay = '', existingServerNames = [], existingIds = [], onSubmit, onCancel }) {
+export function AddDialog({ existingServerNames = [], existingIds = [], onSubmit, onCancel }) {
   const [text, setText] = useState(SAMPLES[0].value);
   const [submitting, setSubmitting] = useState(false);
   const [remoteError, setRemoteError] = useState('');
@@ -59,6 +79,7 @@ export function AddDialog({ fileDisplay = '', existingServerNames = [], existing
   );
   const issues = result.issues.filter((issue) => issue.level === 'error' || issue.level === 'warn');
   const canSubmit = result.ok === true && submitting === false;
+  const parsed = result.ok === true && result.value !== null ? result.value : null;
 
   // 切换示例时清掉上一次的远端错误，避免旧报错一直挂着。
   useEffect(() => {
@@ -142,16 +163,17 @@ export function AddDialog({ fileDisplay = '', existingServerNames = [], existing
             </div>
           )}
 
-          <div className="dshmcp-hint">
-            <span className="dshmcp-hint-icon">
-              <InfoIcon />
-            </span>
-            <span>
-              写入位置
-              {fileDisplay === '' ? ' MCP 维护配置文件' : <span className="dshmcp-path"> {fileDisplay}</span>}
-              ；保存后 DSH 将自动热重载，无需重启。
-            </span>
-          </div>
+          {parsed === null ? null : (
+            <div className="dshmcp-hint">
+              <span className="dshmcp-hint-icon">
+                <InfoIcon />
+              </span>
+              <span>
+                将写入 <span className="dshmcp-path">{parsed.serverName}</span> · {parsed.transport}
+                {parsed.disabled === true ? ' · 默认停用' : ''}
+              </span>
+            </div>
+          )}
         </div>
         <div className="dshmcp-dialog-foot">
           <button type="button" className="dshmcp-btn is-secondary" onClick={onCancel} disabled={submitting}>

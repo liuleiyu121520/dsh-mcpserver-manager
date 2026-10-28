@@ -1,9 +1,9 @@
 /**
- * 「写入位置」条的**真渲染**测试。
+ * Toolbar 的**真渲染**测试。
  *
- * 为什么不能用 props 断言代替：这一条的整个价值是"用户一眼看到的那几个字"。
- * 组件里 `showProfile` 是个派生条件（`source === 'config.patchFile'` 时不渲染
- * profile chip），只看 props 是证明不了"chip 到底有没有出现在树上"的。
+ * 为什么不能用 props 断言代替：这一节守的两件事都是"树上到底有没有那个节点"——
+ * 刷新按钮在空列表时**不该存在**，写入位置条**已经删掉**。只看 props 是证明
+ * 不了这一点的。
  *
  * 做法：用 esbuild 现场把**真正的 `src/client/Toolbar.jsx`** 打成 CJS
  * （react 外链），在 `node:vm` 里配一个最小 React 桩执行，然后展开函数组件、
@@ -117,76 +117,68 @@ function render(Toolbar, props) {
 }
 
 /**
- * 树上是否有一个带指定 className 的元素（`dshmcp-chip` 这种状态判断必须看树）。
+ * 树上是否有指定 aria-label 的按钮（刷新按钮就是这么定位的）。
  * @param {{elements: any[]}} tree 树。
- * @param {string} className 类名。
+ * @param {string} label aria-label。
  * @returns {boolean} 是否存在。
  */
-function hasClass(tree, className) {
-  return tree.elements.some((element) => element.props?.className === className);
+function hasButton(tree, label) {
+  return tree.elements.some((element) => element.type === 'button' && element.props?.['aria-label'] === label);
 }
 
-/**
- * 取某个类名元素的文本（chip 里 `profile: {profile}` 是**两个**文本节点，
- * 所以必须把它们拼起来再比）。
- * @param {{elements: any[]}} tree 树。
- * @param {string} className 类名。
- * @returns {string} 文本；元素不存在时为空串。
- */
-function classText(tree, className) {
-  const element = tree.elements.find((node) => node.props?.className === className);
-  if (element === undefined) return '';
-  return walk(element, { elements: [], texts: [] }).texts.join('');
-}
-
-describe('client Toolbar · 写入位置条的真渲染', { skip: !hasEsbuild }, () => {
-  it('source=config.patchFile：不渲染 profile chip，note 为「由配置 patchFile 显式指定」', async () => {
+describe('client Toolbar · 头部真渲染', { skip: !hasEsbuild }, () => {
+  it('列表为空：不渲染刷新按钮（空列表刷新毫无反馈，只会让人以为漏加载了）', async () => {
     const Toolbar = await loadToolbar();
-    const tree = render(Toolbar, {
-      fileDisplay: '~/explicit/cordis.patch.yml',
-      profile: 'web',
-      source: 'config.patchFile',
-    });
-    assert.equal(hasClass(tree, 'dshmcp-chip'), false, 'patchFile 场景不该出现 profile chip（标签会与宿主不符）');
-    assert.equal(
-      tree.texts.some((text) => text.includes('profile:')),
-      false,
-      `不该有 profile 文案：${tree.texts.join(' | ')}`,
-    );
-    assert.ok(tree.texts.includes('由配置 patchFile 显式指定'), tree.texts.join(' | '));
-    assert.ok(tree.texts.includes('~/explicit/cordis.patch.yml'), '路径必须照旧显示');
+    const tree = render(Toolbar, { showRefresh: false });
+    assert.equal(hasButton(tree, '刷新列表'), false, '空列表不该有刷新按钮');
+    assert.ok(tree.texts.includes('添加 MCP'), `「添加 MCP」必须一直在：${tree.texts.join(' | ')}`);
   });
 
-  it('source=profileContext：渲染 profile chip', async () => {
+  it('列表非空：渲染刷新按钮', async () => {
+    const Toolbar = await loadToolbar();
+    const tree = render(Toolbar, { showRefresh: true });
+    assert.equal(hasButton(tree, '刷新列表'), true, '列表非空时刷新按钮必须在');
+  });
+
+  it('刷新进行中时刷新按钮 disabled，添加按钮不受影响', async () => {
+    const Toolbar = await loadToolbar();
+    const tree = render(Toolbar, { showRefresh: true, busy: true });
+    const refresh = tree.elements.find(
+      (element) => element.type === 'button' && element.props?.['aria-label'] === '刷新列表',
+    );
+    assert.equal(refresh.props.disabled, true);
+    const add = tree.elements.find(
+      (element) => element.type === 'button' && (element.children ?? []).includes('添加 MCP'),
+    );
+    assert.equal(add.props.disabled, undefined, 'busy 不该拦住「添加 MCP」');
+  });
+
+  it('不再渲染写入位置条（路径/ profile / 来源说明一并不渲染）', async () => {
     const Toolbar = await loadToolbar();
     const tree = render(Toolbar, {
+      showRefresh: true,
+      // 旧版这些 props 会画出「写入位置 ~/.dsh/...」条；新版即使传进来也不该理。
       fileDisplay: '~/.dsh/profiles/desktop/cordis.patch.yml',
       profile: 'desktop',
       source: 'profileContext',
     });
-    assert.equal(hasClass(tree, 'dshmcp-chip'), true, '宿主 profile 必须显示出来');
-    assert.equal(classText(tree, 'dshmcp-chip'), 'profile: desktop', tree.texts.join(' | '));
-    assert.ok(tree.texts.includes('由当前宿主 profile 决定'), tree.texts.join(' | '));
+    const joined = tree.texts.join(' | ');
+    assert.equal(
+      tree.elements.some((element) => element.props?.className === 'dshmcp-target'),
+      false,
+      '写入位置条的 DOM 节点不该再出现',
+    );
+    assert.equal(joined.includes('写入位置'), false, `不该有「写入位置」文案：${joined}`);
+    assert.equal(joined.includes('cordis.patch.yml'), false, `不该露路径：${joined}`);
+    assert.equal(joined.includes('profile:'), false, `不该有 profile chip：${joined}`);
   });
 
-  it('回落层（config.dshHome / $DSH_HOME / ~/.dsh）仍渲染 chip 与各自说明', async () => {
+  it('副标题只有一句短文案（页面上不再堆解释）', async () => {
     const Toolbar = await loadToolbar();
-    const cases = [
-      ['config.dshHome', '由插件配置 dshHome 指定'],
-      ['$DSH_HOME', '由环境变量 $DSH_HOME 决定'],
-      ['~/.dsh', '宿主未报告 profile，已回落到默认位置'],
-    ];
-    for (const [source, note] of cases) {
-      const tree = render(Toolbar, { fileDisplay: '~/.dsh/profiles/web/cordis.patch.yml', profile: 'web', source });
-      assert.equal(hasClass(tree, 'dshmcp-chip'), true, `${source} 应显示 chip`);
-      assert.ok(tree.texts.includes(note), `${source} 的说明文案不对：${tree.texts.join(' | ')}`);
-    }
-  });
-
-  it('路径未解析出来时占位文案仍是「正在解析…」，未知来源不编造说明', async () => {
-    const Toolbar = await loadToolbar();
-    const tree = render(Toolbar, { fileDisplay: '', profile: '', source: 'nonsense' });
-    assert.ok(tree.texts.includes('正在解析…'), tree.texts.join(' | '));
-    assert.equal(tree.texts.some((text) => text.includes('决定') || text.includes('指定')), false, tree.texts.join(' | '));
+    const tree = render(Toolbar, { showRefresh: false });
+    const subtitle = tree.texts.filter((text) => text.trim() !== '');
+    const long = subtitle.filter((text) => text.length > 24);
+    assert.deepEqual(long, [], `出现长文案：${long.join(' | ')}`);
+    assert.ok(subtitle.includes('管理已接入的 MCP 服务器。'), subtitle.join(' | '));
   });
 });

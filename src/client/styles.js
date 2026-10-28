@@ -24,24 +24,6 @@ export const CSS = `
 .dshmcp-path { font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
 .dshmcp-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
-.dshmcp-target {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 8px 12px; border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-1, #f9fafb);
-  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1, #e5e7eb);
-}
-.dshmcp-target-label {
-  flex: 0 0 auto; font-size: 11px; line-height: 16px; font-weight: 600;
-  letter-spacing: 0.02em; color: var(--dsw-alias-label-tertiary, #6b7280);
-}
-.dshmcp-target-path {
-  min-width: 0; font-size: 12px; line-height: 18px;
-  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  color: var(--dsw-alias-label-primary, #1f2328);
-  overflow-wrap: anywhere;
-}
-.dshmcp-target-note { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #6b7280); }
-
 .dshmcp-btn {
   display: inline-flex; align-items: center; gap: 4px;
   height: 32px; padding: 0 12px; border: none; border-radius: 8px;
@@ -128,7 +110,6 @@ export const CSS = `
   color: var(--dsw-alias-label-primary, #1f2328);
 }
 .dshmcp-menu-item:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, #e5e7eb); }
-.dshmcp-menu-item:disabled { color: var(--dsw-alias-label-dimmed, #9ca3af); cursor: not-allowed; }
 .dshmcp-menu-item.is-danger { color: var(--dsw-alias-state-error-primary, #dc2626); }
 
 .dshmcp-empty {
@@ -145,9 +126,17 @@ export const CSS = `
 .dshmcp-skeleton + .dshmcp-skeleton { margin-top: 12px; }
 @keyframes dshmcp-breathe { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
 
+/*
+ * 遮罩层照 DSH 原生 Modal 的写法：--dsw-alias-bg-mask-1 + --dsw-mask-blur
+ * （见 ui-settings-general/SettingsRoot.module.css 的 .mask）。
+ * 早先用的是 --dsw-alias-bg-overlay，那个变量在部分主题里不存在，兜底值
+ * 直接把背景涂成了不透明黑——"弹窗后面看不见东西"就是这么来的。
+ */
 .dshmcp-mask-layer {
   position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
-  background: var(--dsw-alias-bg-overlay, rgba(0, 0, 0, 0.4));
+  background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.24));
+  -webkit-backdrop-filter: var(--dsw-mask-blur, blur(2px));
+  backdrop-filter: var(--dsw-mask-blur, blur(2px));
 }
 .dshmcp-dialog {
   width: 560px; max-width: calc(100vw - 32px); padding: 24px; border-radius: 12px;

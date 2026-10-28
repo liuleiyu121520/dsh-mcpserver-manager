@@ -19,6 +19,37 @@ export const SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 /** 支持的传输方式。 */
 export const TRANSPORTS = Object.freeze(['stdio', 'streamable-http']);
 
+/**
+ * Claude Desktop / Claude Code / Cursor / VS Code 那种「一层集合包一层服务器」的
+ * 外壳键。用户从各家文档里复制的多半是这个形状：
+ *
+ * ```json
+ * { "mcpServers": { "<serverName>": { ... } } }
+ * ```
+ *
+ * 见到外壳就先拆壳：集合键即 serverName（Claude 用它在工具名前做命名空间，
+ * 与 DSH 的 `mcp__<serverName>__<tool>` 是同一件事）。
+ */
+export const WRAPPER_KEYS = Object.freeze(['mcpServers', 'servers']);
+
+/**
+ * 传输方式别名 → DSH 规范值。
+ *
+ * `sse` 也在这里：DSH 的 MCP 客户端只认 `stdio` / `streamable-http`
+ * （`@deepseek-ai/dsh-mcp-client` 的 schema 是 `z.const('stdio')` /
+ * `z.const('streamable-http')`），SSE 没有实现。硬拒一个从别处复制来的
+ * 配置没有意义——按 streamable-http 写入并明确告知，才是能跑起来的路。
+ */
+export const TRANSPORT_ALIASES = Object.freeze({
+  stdio: 'stdio',
+  sse: 'streamable-http',
+  http: 'streamable-http',
+  https: 'streamable-http',
+  'streamable-http': 'streamable-http',
+  streamablehttp: 'streamable-http',
+  'streamable_http': 'streamable-http',
+});
+
 /** 后端补齐后写入的默认值。 */
 export const DEFAULTS = Object.freeze({
   toolCallTimeoutMs: 60000,
@@ -42,6 +73,9 @@ export const KNOWN_FIELDS = Object.freeze([
   'maxInstructionBytes',
   'failOnStartupError',
   'reconnect',
+  // cordis 原生的条目级停用键：Claude 配置里常带 `"disabled": false`，
+  // 认它、校验它，落盘时提到条目级（不是 config 里的一行）。
+  'disabled',
 ]);
 
 /**
@@ -64,6 +98,10 @@ export const CANONICAL_ORDER = Object.freeze([
   'maxInstructionBytes',
   'failOnStartupError',
   'reconnect',
+  // 兜底声明：`disabled` 正常路径上会被 store 提到条目级（`serializeEntry` 的
+  // `entry.disabled`），不会走 config 序列化；放在这里是为了与 KNOWN_FIELDS
+  // 保持同一套字段，序列化行为因此可预测。
+  'disabled',
 ]);
 
 /**
@@ -302,7 +340,160 @@ function issue(level, code, path, message) {
 }
 
 /**
- * 不含唯一性的纯规则校验（R1–R4、R6–R16）。
+ * 拆掉 `{ mcpServers: { <name>: {...} } }` 这层外壳。
+ *
+ * @param {Record<string, unknown>} record 顶层对象。
+ * @param {Issue[]} issues issue 收集器（原地追加）。
+ * @returns {{input: Record<string, unknown>}|null} 拆壳结果；`null` 表示没有外壳
+ *   或外壳形状不对（错误已写进 issues）。
+ */
+function unwrapServers(record, issues) {
+  const wrapperKey = WRAPPER_KEYS.find((key) => record[key] !== undefined);
+  if (wrapperKey === undefined) return null;
+  const wrapper = record[wrapperKey];
+  if (!isPlainObject(wrapper)) {
+    issues.push(issue(LEVEL_ERROR, 'E_WRAPPER', `$.${wrapperKey}`, `${wrapperKey} 必须是一个对象`));
+    return { input: null };
+  }
+  const names = Object.keys(/** @type {Record<string, unknown>} */ (wrapper));
+  if (names.length === 0) {
+    issues.push(issue(LEVEL_ERROR, 'E_WRAPPER', `$.${wrapperKey}`, `${wrapperKey} 里没有任何服务器`));
+    return { input: null };
+  }
+  if (names.length > 1) {
+    // 本页一次只写一条：多给就得替用户猜，猜错等于往配置里塞他不要的东西。
+    const shown = names.slice(0, 5).join('、') + (names.length > 5 ? '…' : '');
+    issues.push(
+      issue(
+        LEVEL_ERROR,
+        'E_WRAPPER_MULTI',
+        `$.${wrapperKey}`,
+        `${wrapperKey} 里有 ${names.length} 个服务器（${shown}），一次只能添加一个`,
+      ),
+    );
+    return { input: null };
+  }
+  const name = names[0];
+  const body = /** @type {Record<string, unknown>} */ (wrapper)[name];
+  if (!isPlainObject(body)) {
+    issues.push(
+      issue(LEVEL_ERROR, 'E_WRAPPER', `$.${wrapperKey}.${name}`, `${wrapperKey}.${name} 必须是一个对象`),
+    );
+    return { input: null };
+  }
+
+  const siblings = Object.keys(record).filter((key) => key !== wrapperKey);
+  if (siblings.length > 0) {
+    issues.push(
+      issue(
+        LEVEL_WARN,
+        'W_WRAPPER_EXTRA',
+        '$',
+        `已按 ${wrapperKey} 里的 "${name}" 解析，同级字段（${siblings.slice(0, 5).join('、')}）未采用`,
+      ),
+    );
+  }
+
+  /** @type {Record<string, unknown>} */
+  const input = { .../** @type {Record<string, unknown>} */ (body) };
+  if (input.serverName !== undefined && input.serverName !== name) {
+    issues.push(
+      issue(
+        LEVEL_WARN,
+        'W_NAME_OVERRIDDEN',
+        '$.serverName',
+        `serverName 取集合键 "${name}"，条目里写的那个已忽略`,
+      ),
+    );
+  }
+  input.serverName = name;
+  return { input };
+}
+
+/**
+ * 把各种来源的传输字段收敛成 `transport`，并按需给出提示。
+ *
+ * 认三种写法：DSH 的 `transport`、Claude 的 `transportType`、以及各家通用的
+ * `type`。别名（`sse` / `http` …）先归一再进 R3；两个来源字段映射完即丢弃，
+ * 不留在结果里当"未知字段"写进配置。
+ *
+ * @param {Record<string, unknown>} input 已拆壳的输入（**原地修改**）。
+ * @param {Issue[]} issues issue 收集器。
+ * @returns {void}
+ */
+function adoptTransport(input, issues) {
+  let raw = typeof input.transport === 'string' ? input.transport : undefined;
+  if (raw === undefined) {
+    for (const alias of ['transportType', 'type']) {
+      if (typeof input[alias] === 'string') {
+        raw = /** @type {string} */ (input[alias]);
+        break;
+      }
+    }
+  }
+  delete input.transportType;
+  delete input.type;
+
+  if (raw === undefined) {
+    // 没写传输方式：按形状推断（有 command 就是本地进程，有 url 就是远程）。
+    if (typeof input.command === 'string') {
+      input.transport = 'stdio';
+      issues.push(issue(LEVEL_WARN, 'W_INFER_TRANSPORT', '$.transport', '未写传输方式，按 command 推断为 stdio'));
+    } else if (typeof input.url === 'string') {
+      input.transport = 'streamable-http';
+      issues.push(
+        issue(LEVEL_WARN, 'W_INFER_TRANSPORT', '$.transport', '未写传输方式，按 url 推断为 streamable-http'),
+      );
+    }
+    return;
+  }
+
+  const key = raw.trim().toLowerCase();
+  const mapped = TRANSPORT_ALIASES[key];
+  if (mapped === undefined) {
+    // 认不出来的值原样留着，交给 R3 报错（错误文案里会带上这个值）。
+    input.transport = raw;
+    return;
+  }
+  input.transport = mapped;
+  if (key === 'sse') {
+    issues.push(
+      issue(
+        LEVEL_WARN,
+        'W_SSE',
+        '$.transport',
+        'DSH 不支持 SSE，已按 streamable-http 写入；连不上时请改用该服务的 streamable-http 地址',
+      ),
+    );
+  } else if (input.transport !== raw) {
+    issues.push(
+      issue(LEVEL_WARN, 'W_TRANSPORT_ALIAS', '$.transport', `传输方式 "${raw}" 已归一为 ${mapped}`),
+    );
+  }
+}
+
+/**
+ * 输入整形：拆壳 → 收敛传输字段。**返回新对象，不改调用方传进来的值**
+ * （`validateConfig` 会被同一个 fixture 反复调用，绝不能被写脏）。
+ *
+ * @param {Record<string, unknown>} value 顶层对象。
+ * @param {Issue[]} issues issue 收集器。
+ * @returns {Record<string, unknown>|null} 整形后的输入；形状不对返回 null。
+ */
+function adoptInput(value, issues) {
+  const unwrapped = unwrapServers(value, issues);
+  if (unwrapped !== null) {
+    if (unwrapped.input === null) return null;
+    adoptTransport(unwrapped.input, issues);
+    return unwrapped.input;
+  }
+  const input = { ...value };
+  adoptTransport(input, issues);
+  return input;
+}
+
+/**
+ * 不含唯一性的纯规则校验（R1–R4、R6–R17）。
  *
  * 浏览器与宿主都可直接调用：它不碰任何 I/O。
  *
@@ -319,13 +510,24 @@ export function validateConfig(value) {
     issues.push(issue(LEVEL_ERROR, 'E_ROOT', '$', '配置必须是一个 JSON 对象'));
     return { issues, normalized: null };
   }
-  const input = /** @type {Record<string, unknown>} */ (value);
+  const adopted = adoptInput(/** @type {Record<string, unknown>} */ (value), issues);
+  if (adopted === null) return { issues, normalized: null };
+  const input = adopted;
 
   // R3 transport 必填且合法。
   const transport = input.transport;
   const transportOk = typeof transport === 'string' && TRANSPORTS.includes(transport);
   if (!transportOk) {
-    issues.push(issue(LEVEL_ERROR, 'E_TRANSPORT', '$.transport', 'transport 必填，只能是 stdio 或 streamable-http'));
+    issues.push(
+      issue(
+        LEVEL_ERROR,
+        'E_TRANSPORT',
+        '$.transport',
+        typeof transport === 'string'
+          ? `不支持 transport "${transport}"，只能是 stdio 或 streamable-http`
+          : 'transport 必填，只能是 stdio 或 streamable-http',
+      ),
+    );
   }
 
   // R4 serverName 格式。
@@ -391,6 +593,11 @@ export function validateConfig(value) {
   // R14 failOnStartupError：布尔。
   if (input.failOnStartupError !== undefined && typeof input.failOnStartupError !== 'boolean') {
     issues.push(issue(LEVEL_ERROR, 'E_FAIL', '$.failOnStartupError', 'failOnStartupError 必须是布尔值'));
+  }
+
+  // R17 disabled：布尔（cordis 原生条目级停用键）。
+  if (input.disabled !== undefined && typeof input.disabled !== 'boolean') {
+    issues.push(issue(LEVEL_ERROR, 'E_DISABLED', '$.disabled', 'disabled 必须是布尔值'));
   }
 
   // R15 字段与传输方式不匹配。

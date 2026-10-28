@@ -73,11 +73,15 @@ describe('validate · R2 顶层为对象', () => {
 });
 
 describe('validate · R3 transport 合法', () => {
-  it('缺失 / 非法值 → E_TRANSPORT', () => {
-    assert.ok(findIssue(validateConfig({ serverName: 'a', command: 'n' }).issues, 'E_TRANSPORT'));
-    assert.ok(
-      findIssue(validateConfig({ serverName: 'a', transport: 'sse', command: 'n' }).issues, 'E_TRANSPORT'),
-    );
+  it('既没写传输方式、也推不出来 → E_TRANSPORT', () => {
+    assert.ok(findIssue(validateConfig({ serverName: 'a' }).issues, 'E_TRANSPORT'));
+    assert.ok(findIssue(validateConfig({ serverName: 'a', foo: 1 }).issues, 'E_TRANSPORT'));
+  });
+
+  it('写了但认不出来 → E_TRANSPORT，且文案带上那个值', () => {
+    const issue = findIssue(validateConfig({ serverName: 'a', transport: 'websocket', url: 'https://a.test' }).issues, 'E_TRANSPORT');
+    assert.ok(issue !== undefined);
+    assert.match(issue.message, /websocket/);
   });
 
   it('两种合法值都通过', () => {
@@ -86,6 +90,30 @@ describe('validate · R3 transport 合法', () => {
       const { issues } = validateConfig({ serverName: 'a', transport, ...base });
       assert.equal(findIssue(issues, 'E_TRANSPORT'), undefined, `${transport} 应通过`);
     }
+  });
+
+  it('按形状推断：command → stdio，url → streamable-http（各带一条 warn）', () => {
+    const byCommand = validateServerInput(JSON.stringify({ serverName: 'a', command: 'npx' }));
+    assert.equal(byCommand.ok, true);
+    assert.equal(byCommand.value.transport, 'stdio');
+    assert.ok(findIssue(byCommand.issues, 'W_INFER_TRANSPORT') !== undefined);
+
+    const byUrl = validateServerInput(JSON.stringify({ serverName: 'a', url: 'https://a.test/mcp' }));
+    assert.equal(byUrl.ok, true);
+    assert.equal(byUrl.value.transport, 'streamable-http');
+    assert.ok(findIssue(byUrl.issues, 'W_INFER_TRANSPORT') !== undefined);
+  });
+
+  it('sse 归一为 streamable-http，并明确告知（DSH 没有 SSE 实现）', () => {
+    const result = validateServerInput(
+      JSON.stringify({ serverName: 'a', transport: 'sse', url: 'https://a.test/sse' }),
+    );
+    assert.equal(result.ok, true, '不该硬拒：能跑起来比拒绝更有用');
+    assert.equal(result.value.transport, 'streamable-http');
+    const issue = findIssue(result.issues, 'W_SSE');
+    assert.ok(issue !== undefined);
+    assert.equal(issue.level, 'warn');
+    assert.match(issue.message, /SSE/);
   });
 });
 
@@ -234,6 +262,109 @@ describe('validate · R16 未知字段警告放行', () => {
     for (const field of CANONICAL_ORDER) {
       assert.ok(KNOWN_FIELDS.includes(field), `canonical 字段 ${field} 必须在白名单里`);
     }
+  });
+});
+
+describe('validate · Claude / Cursor 格式（{ mcpServers: { … } }）', () => {
+  /** 用户实际贴过来的那条（SSE + headers + disabled + 集合键当 serverName）。 */
+  const userPasted = {
+    mcpServers: {
+      creis_mcp_server: {
+        transportType: 'sse',
+        url: 'https://testllmgateway.3g.fang.com/mcp/creis_mcp_server',
+        headers: { 'x-litellm-api-key': 'Bearer sk-test' },
+        disabled: false,
+      },
+    },
+  };
+
+  it('拆壳 + 字段映射：集合键即 serverName，transportType 即 transport', () => {
+    const result = validateServerInput(JSON.stringify(userPasted));
+    assert.equal(result.ok, true, JSON.stringify(result.issues));
+    assert.equal(result.value.serverName, 'creis_mcp_server');
+    assert.equal(result.value.transport, 'streamable-http');
+    assert.equal(result.value.url, userPasted.mcpServers.creis_mcp_server.url);
+    assert.deepEqual(result.value.headers, { 'x-litellm-api-key': 'Bearer sk-test' });
+    assert.equal(result.value.disabled, false, 'disabled 必须留着，落盘时要提到条目级');
+  });
+
+  it('映射掉的外来字段不会残留在结果里（也就不会变成未知字段被写进配置）', () => {
+    const result = validateServerInput(JSON.stringify(userPasted));
+    assert.equal('transportType' in result.value, false);
+    assert.equal('type' in result.value, false);
+    assert.equal('mcpServers' in result.value, false);
+    assert.equal(findIssue(result.issues, 'W_UNKNOWN'), undefined, '已经认下来的字段不该再报未知');
+  });
+
+  it('type: http 也认（Claude Code / VS Code 的写法）', () => {
+    const result = validateServerInput(
+      JSON.stringify({ mcpServers: { r: { type: 'http', url: 'https://a.test/mcp' } } }),
+    );
+    assert.equal(result.ok, true, JSON.stringify(result.issues));
+    assert.equal(result.value.transport, 'streamable-http');
+    assert.equal(result.value.serverName, 'r');
+  });
+
+  it('servers 键（VS Code 写法）同样拆壳', () => {
+    const result = validateServerInput(
+      JSON.stringify({ servers: { gh: { type: 'stdio', command: 'npx', args: ['-y', 'x'] } } }),
+    );
+    assert.equal(result.ok, true, JSON.stringify(result.issues));
+    assert.equal(result.value.serverName, 'gh');
+    assert.equal(result.value.transport, 'stdio');
+  });
+
+  it('多个服务器 → E_WRAPPER_MULTI，一次只能加一个', () => {
+    const result = validateServerInput(
+      JSON.stringify({
+        mcpServers: { a: { command: 'npx' }, b: { command: 'npx' }, c: { url: 'https://a.test' } },
+      }),
+    );
+    assert.equal(result.ok, false);
+    const issue = findIssue(result.issues, 'E_WRAPPER_MULTI');
+    assert.ok(issue !== undefined);
+    assert.match(issue.message, /3 个服务器/);
+    assert.match(issue.message, /a、b、c/);
+  });
+
+  it('空集合 / 非对象集合 → E_WRAPPER', () => {
+    assert.ok(findIssue(validateServerInput('{"mcpServers": {}}').issues, 'E_WRAPPER') !== undefined);
+    assert.ok(findIssue(validateServerInput('{"mcpServers": []}').issues, 'E_WRAPPER') !== undefined);
+    assert.ok(findIssue(validateServerInput('{"mcpServers": {"a": 1}}').issues, 'E_WRAPPER') !== undefined);
+  });
+
+  it('条目自带的 serverName 与集合键冲突 → 以集合键为准 + 一条 warn', () => {
+    const result = validateServerInput(
+      JSON.stringify({ mcpServers: { real: { serverName: 'other', command: 'npx' } } }),
+    );
+    assert.equal(result.value.serverName, 'real');
+    assert.ok(findIssue(result.issues, 'W_NAME_OVERRIDDEN') !== undefined);
+  });
+
+  it('外壳外的同级字段不采用，并留一条 warn（避免静默丢东西）', () => {
+    const result = validateServerInput(
+      JSON.stringify({ mcpServers: { a: { command: 'npx' } }, globalShortcut: 'Cmd+Esc' }),
+    );
+    assert.equal(result.ok, true);
+    const issue = findIssue(result.issues, 'W_WRAPPER_EXTRA');
+    assert.ok(issue !== undefined);
+    assert.match(issue.message, /globalShortcut/);
+  });
+
+  it('disabled 必须是布尔', () => {
+    assert.ok(
+      findIssue(
+        validateServerInput('{"mcpServers": {"a": {"command": "n", "disabled": "yes"}}}').issues,
+        'E_DISABLED',
+      ) !== undefined,
+    );
+  });
+
+  it('整形不改调用方传进来的对象（validateConfig 会被同一 fixture 反复调用）', () => {
+    const fixture = { serverName: 'a', transportType: 'sse', url: 'https://a.test', type: 'sse' };
+    const before = JSON.stringify(fixture);
+    validateConfig(fixture);
+    assert.equal(JSON.stringify(fixture), before, '输入对象被写脏了');
   });
 });
 

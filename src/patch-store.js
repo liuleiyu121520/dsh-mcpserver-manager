@@ -787,12 +787,19 @@ export function createPatchStore(options = {}) {
         throw error;
       }
       const serverName = String(result.value.serverName);
+      // `disabled` 是**条目级**键，不是 MCP 客户端 config 里的字段：留着会被
+      // 序列化成 `config.disabled`，cordis 看不见、等于白写。所以在这里提出来。
+      const { disabled, ...clientConfig } = result.value;
       const entry = {
         id: `mcp-${serverName}`,
         name: MCP_CLIENT_NAME,
-        config: result.value,
+        disabled: disabled === true,
+        config: clientConfig,
       };
       const next = insertEntry(text, serializeEntry(entry));
+      // 这一行 `disabled` 是插件自己写的：后续"启用"应该删掉整行，而不是
+      // 留一行 `disabled: false` 在用户文件里。
+      if (disabled === true) insertedDisabled.add(serverName);
       const item = scan(next).items.find((entry2) => entry2.serverName === serverName) ?? null;
       return { next, payload: { item } };
     });

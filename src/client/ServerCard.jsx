@@ -86,22 +86,6 @@ export function ServerCard({ item, highlighted = false, onToggle, onRemove, busy
                 <button
                   type="button"
                   className="dshmcp-menu-item"
-                  disabled
-                  title="编辑（即将上线）"
-                >
-                  编辑（即将上线）
-                </button>
-                <button
-                  type="button"
-                  className="dshmcp-menu-item"
-                  disabled
-                  title="复制为 JSON（即将上线）"
-                >
-                  复制为 JSON（即将上线）
-                </button>
-                <button
-                  type="button"
-                  className="dshmcp-menu-item"
                   onClick={() => run(() => onToggle(name, item.enabled !== true))}
                 >
                   {item.enabled === true ? '停用' : '启用'}

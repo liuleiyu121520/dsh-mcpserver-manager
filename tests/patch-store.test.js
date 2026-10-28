@@ -780,3 +780,66 @@ describe('patch-store · 目标文件由宿主 profileContext 决定（BUG-2 回
     }
   });
 });
+
+describe('patch-store · Claude 格式落盘（{ mcpServers: { … } }）', () => {
+  /**
+   * 用户从别处复制来的那条：SSE + headers + disabled。
+   * @returns {string} JSON 文本。
+   */
+  const claudeJson = () =>
+    JSON.stringify({
+      mcpServers: {
+        creis_mcp_server: {
+          transportType: 'sse',
+          url: 'https://testllmgateway.3g.fang.com/mcp/creis_mcp_server',
+          headers: { 'x-litellm-api-key': 'Bearer sk-test' },
+          disabled: false,
+        },
+      },
+    });
+
+  it('拆壳后落盘：serverName / transport / url / headers 都在，且没有 config.disabled', async () => {
+    const { store, fs, path } = storeOn(`${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(claudeJson());
+    const text = fs.readFileSync(path, 'utf8');
+    assert.ok(text.includes("serverName: 'creis_mcp_server'"), text);
+    assert.ok(text.includes("transport: 'streamable-http'"), text);
+    assert.ok(text.includes("url: 'https://testllmgateway.3g.fang.com/mcp/creis_mcp_server'"), text);
+    assert.ok(text.includes("x-litellm-api-key: 'Bearer sk-test'"), text);
+    assert.equal(text.includes('disabled'), false, 'disabled:false 不该写进文件（默认就是启用）');
+    assert.equal(text.includes('transportType'), false, '外来字段不该落盘');
+  });
+
+  it('disabled:true 提到条目级（不是 config 里的字段），并能在重启后读回', async () => {
+    const { store, fs, path } = storeOn(`${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    const json = JSON.stringify({
+      mcpServers: { off: { command: 'npx', args: ['-y', 'x'], disabled: true } },
+    });
+    const added = await store.add(json);
+    assert.equal(added.item.enabled, false);
+    assert.equal(added.item.disabledBy, 'native-key');
+    const text = fs.readFileSync(path, 'utf8');
+    // 缩进 2 空格 = 条目级；缩进 4 空格才会是 config 子键。
+    assert.ok(text.includes('\n  disabled: true\n'), text);
+    assert.equal(text.includes('    disabled:'), false, 'disabled 不许写进 config 子树');
+  });
+
+  it('disabled:true 加进来的条目，启用时整行删掉（那行是我们写的）', async () => {
+    const { store, fs, path } = storeOn(`${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(JSON.stringify({ mcpServers: { off: { command: 'npx', disabled: true } } }));
+    await store.setEnabled('off', true);
+    const text = fs.readFileSync(path, 'utf8');
+    assert.equal(text.includes('disabled'), false, `我们自己写的 disabled 行该整行删掉：\n${text}`);
+    assert.equal((await store.read()).items[0].enabled, true);
+  });
+
+  it('多条 mcpServers 直接拒，文件一字节不动', async () => {
+    const initial = `${BEGIN_ANCHOR}\n${END_ANCHOR}\n`;
+    const { store, fs, path } = storeOn(initial);
+    await assert.rejects(
+      () => store.add(JSON.stringify({ mcpServers: { a: { command: 'n' }, b: { command: 'n' } } })),
+      (error) => error.code === 'invalid-config',
+    );
+    assert.equal(fs.readFileSync(path, 'utf8'), initial);
+  });
+});

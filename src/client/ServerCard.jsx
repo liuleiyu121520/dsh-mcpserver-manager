@@ -29,8 +29,13 @@ function formatTimeout(ms) {
 /**
  * 工具列表为空时的那句话。
  *
- * 三件事必须分开说：停用了（本来就不注册）、刚重启（连接还没建好）、真的一个
- * 工具都没有。混成一句"暂无工具"，用户就不知道要不要动手。
+ * 三件事必须分开说：停用了（本来就不注册）、读不到（宿主没给 tools 服务）、
+ * 真的一个都没有。混成一句"暂无工具"，用户就不知道要不要动手。
+ *
+ * 注意**不要**说"重启 DSH 后才生效"：配置文件由宿主的 HMR 精确监听
+ * （`packages/boot/hmr` 的 `watchConfig`，chokidar），改动后 `reconcileProfile()`
+ * 会重新合成 loader 树，条目增删与 `disabled` 启停都是**即时生效**的。
+ * 只有**插件模块代码**变了才需要重启。
  * @param {object} item ServerItem。
  * @param {object|null} catalog 工具表。
  * @returns {string} 说明。
@@ -38,7 +43,7 @@ function formatTimeout(ms) {
 function emptyToolNote(item, catalog) {
   if (item.enabled !== true) return '该服务器已停用，工具不会注册。';
   if (catalog !== null && catalog.available === false) return '宿主没有提供 tools 服务，读不到工具列表。';
-  return '当前没有注册任何工具：若刚改过配置，重启 DSH 后才会生效；否则看 DSH 日志里的连接错误。';
+  return '当前没有注册任何工具：刚改过配置就等一两秒（宿主会自动重新加载），否则看 DSH 日志里的连接错误。';
 }
 
 /**

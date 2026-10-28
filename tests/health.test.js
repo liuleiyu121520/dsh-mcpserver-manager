@@ -219,7 +219,10 @@ describe('health · 握手通过后把服务端的工具数问出来（0.4.2）'
     assert.equal(report.probeTools, 42, '要把服务端的答案带回来，卡片才有证据');
     assert.match(report.detail, /服务端有 42 个工具/);
     assert.match(report.detail, /DSH 注册了 0 个/, '两边数字必须摆在一起');
-    assert.match(report.detail, /重启/, '要给出可执行的下一步');
+    assert.match(report.detail, /配置未加载或连接失败/, '要给出可执行的下一步');
+    // v0.4.5 起不再提"重启"：补丁文件由宿主 HMR 精确监听（watchConfig →
+    // reconcileProfile），改完一两秒就生效。给一个错的下一步比不给更糟。
+    assert.equal(/重启/.test(report.detail), false, '配置是热加载的，让用户去重启是误导');
     assert.ok(report.detail.length <= 80, `detail 太长，toast 里放不下：${report.detail}`);
 
     // 三步都走到了，且后两步带上了 session id —— 这是 MCP 规范要求。

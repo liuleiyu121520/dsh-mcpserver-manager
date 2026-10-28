@@ -255,7 +255,7 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 - 两类外部网络请求，都只在必要时发生：
   1. 版本检查 —— 只打 `api.github.com` 的 releases/latest，8 秒超时；
   2. 健康检查 —— 只对**你自己配置的** `streamable-http` 地址走一次 MCP 握手（仅 `http`/`https`，其它协议直接拒绝），整个探测共 6 秒超时。点「健康检查」才发，不点不发；**已注册工具数 > 0 时连探测都不发**（已经有硬证据了）
-- 不重启宿主；写盘后由宿主的 `patchReload: live` 自行热重载。「更新」按钮例外：它会调 `pluginManager.installBundle()`，这跟你在插件页手动装一个插件是同一件事（要装包就会动 profile 的依赖）
+- 不重启宿主。写盘后宿主的 HMR 会精确监听到这个文件（`packages/boot/hmr` 的 `watchConfig()`，chokidar 只盯这一个路径，`awaitWriteFinish` 消除写入中途的抖动），触发 `reconcileProfile()` 重新合成 loader 树，条目增删与 `disabled` 启停都是**即时生效**的（见下面的 FAQ）。「更新」按钮例外：它会调 `pluginManager.installBundle()`，那会改 profile 的依赖和模块代码，属于需要重启的情形
 
 ## 工作原理
 
@@ -354,14 +354,21 @@ npm run build && npm run check && npm test
 **健康检查说「服务端有 42 个工具，但 DSH 注册了 0 个」**
 → 先说结论：**你的配置和密钥都是对的**（探测带着它们走完了 `initialize` 和 `tools/list`）。剩下的可能是两件事——
 
-1. **条目形状是旧版的**（≤0.4.2 写入的条目在顶层，宿主不会加载）。看列表页顶部有没有那条黄色提示；有就点「修复」，然后重启 DSH。
-2. 形状已对但连接没建立。`@deepseek-ai/dsh-mcp-client` 连接失败时只写日志、不弹窗（`failOnStartupError` 默认 `false`），所以界面上一片安静。重启 DSH 让它重新加载该条目；仍为 0 就去对话里让它真的调一次这个服务器的工具，那次失败会把真正的原因带出来。
+1. **条目形状是旧版的**（≤0.4.2 写入的条目在顶层，宿主不会加载）。看列表页顶部有没有那条黄色提示；有就点「修复」，**不用重启**——改完一两秒 HMR 就会重新加载。
+2. 形状已对但连接没建立。`@deepseek-ai/dsh-mcp-client` 连接失败时只写日志、不弹窗（`failOnStartupError` 默认 `false`），所以界面上一片安静。去对话里让它真的调一次这个服务器的工具，那次失败会把真正的原因带出来。
 
 **工具数是「共 0 个工具」或「工具数未知」，是插件坏了吗**
 → 都不是。「共 0 个工具」= 宿主此刻确实一个都没注册（点一下健康检查能分清是服务端没工具、还是 DSH 没连上）；「工具数未知」= 宿主没提供 `tools` 服务（多半是 Host 还是旧版本）。
 
 **健康检查说「需要鉴权（HTTP 401）」**
 → 分三种，看它具体说的是哪句：**「该条目没有配置请求头」** = 这条真没配，补上服务要求的键；**「探测按配置没有发送请求头」** = 你配了，但 `probeHeaders` 被关掉了；**「鉴权失败：请求头 X 被拒绝」** = 配了也发了，服务端不认——密钥过期或写错了，这时会点名是哪个键。
+
+**改 MCP 配置（新增 / 编辑 / 启停 / 删除）需要重启 DSH 吗**
+→ **不需要。** 宿主的 HMR 精确监听 `cordis.patch.yml`（`packages/boot/hmr/src/watch-config.ts`：chokidar 只盯这一个路径，`awaitWriteFinish` 等写稳再触发，避免读到写了一半的文件），变更后跑 `reconcileProfile()` 重新合成 loader 树。条目级的 `disabled` 则由 `cordis-plugin-loader` 的 `Entry.update()` 处理——为真时 `fiber.dispose()`，为假时 `init()`。所以开关一拨，对应的 MCP 客户端当场停/启，工具也当场注册/注销：刷新一下列表就能看到工具数变化。
+
+> 前提是 HMR 在跑。`dsh-base` 里 `id: hmr` 那条的 `disabled: !!js "!ctx.get('profileContext')"`——只要有 profile 上下文（desktop / web 宿主）它就是开的；headless 之类没有 profile 的运行才需要手动重启。
+
+→ **需要重启的只有一种：插件自身的模块代码变了**（升级本插件、装新包）。`dsh-hmr` 的 `root: []` 表示不监听模块目录，已在跑的模块会继续跑旧代码，它自己会在日志里留一句 `changed modules keep running their previous code until a restart`。页面顶部那条「Host 是旧版本」横幅说的就是这件事。
 
 **点了「更新」但版本号没变**
 → 看提示：`已更新到 vX，已生效` 说明装好了；`重启 DSH 后生效` 说明这次是冷更新，重启即可。若提示「宿主没有提供插件管理器」，请在「设置 → 插件」里手动装一次。

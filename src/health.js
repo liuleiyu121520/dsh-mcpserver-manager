@@ -398,9 +398,13 @@ async function countToolsOverSession(url, sessionId, { fetchImpl, headers, signa
  *
  * 三种情况必须分开，因为用户下一步做的事完全不同：
  * - **服务端有工具**（`probeTools > 0`）——配置和密钥都是对的，问题在 DSH
- *   这边没建立起连接，重启一下就好。这是最容易被误判成"你没配好"的情形；
+ *   这边没建立起连接。这是最容易被误判成"你没配好"的情形；
  * - **服务端 0 个工具**——服务器自己没东西可注册，用户该去查服务端；
  * - **数不出来**（null）——老实说不知道，别编。
+ *
+ * 措辞上**不要说"重启 DSH"**：配置文件由宿主的 HMR 精确监听
+ * （`packages/boot/hmr` 的 `watchConfig` → `reconcileProfile()`），改完一两秒
+ * 就会生效。给一个错的下一步，比不给更糟——用户会去重启，然后发现问题依旧。
  *
  * @param {number} status HTTP 状态码。
  * @param {string[]} sent 实际发出的请求头键名。
@@ -410,12 +414,12 @@ async function countToolsOverSession(url, sessionId, { fetchImpl, headers, signa
 function describeMissingTools(status, sent, probeTools) {
   const auth = sent.length > 0 ? '鉴权通过' : '未带请求头';
   if (typeof probeTools === 'number' && probeTools > 0) {
-    return `端点可用（HTTP ${status}，${auth}），服务端有 ${probeTools} 个工具，但 DSH 注册了 0 个：重启 DSH 后重试`;
+    return `端点可用（HTTP ${status}，${auth}），服务端有 ${probeTools} 个工具，但 DSH 注册了 0 个：配置未加载或连接失败`;
   }
   if (probeTools === 0) {
     return `端点可用（HTTP ${status}，${auth}），但服务端没有提供任何工具`;
   }
-  return `端点可用（HTTP ${status}，${auth}），但 DSH 未注册任何工具：重启 DSH 后重试`;
+  return `端点可用（HTTP ${status}，${auth}），但 DSH 未注册任何工具：配置未加载或连接失败`;
 }
 
 /**

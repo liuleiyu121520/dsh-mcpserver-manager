@@ -244,9 +244,11 @@ export function McpManager() {
       await toggleServer(serverName, enabled);
       setBanner('');
       await refresh(false);
-      // 启停要重启宿主才真正生效（cordis 的 disabled 由加载器读），
-      // 这句话必须说，否则用户会以为开关坏了。
-      notify(`${serverName} 已${enabled === true ? '启用' : '停用'}，重启 DSH 后生效`);
+      // **不需要重启**：宿主的 HMR 精确监听 cordis.patch.yml
+      // （packages/boot/hmr 的 watchConfig），改动后 reconcileProfile()
+      // 重新合成 loader 树；条目级 disabled 由 loader 的 Entry.update()
+      // 直接 dispose / init 对应 fiber，是运行时行为。
+      notify(`${serverName} 已${enabled === true ? '启用' : '停用'}`);
     } catch (error) {
       showError(error);
     } finally {
@@ -441,7 +443,7 @@ export function McpManager() {
       setBanner('');
       await refresh();
       const count = typeof data.repaired === 'number' ? data.repaired : 0;
-      notify(`已修复 ${count} 条，重启 DSH 后生效`);
+      notify(`已修复 ${count} 条，配置会自动重新加载`);
     } catch (error) {
       showError(error);
     } finally {

@@ -29,6 +29,7 @@ import {
   parseScalar,
   redactSecretValues,
   serializeEntry,
+  serializeInsertEntry,
   splitPair,
 } from './serialize.js';
 import { TRANSPORTS, validateServerInput } from './validate.js';
@@ -44,8 +45,11 @@ export const END_ANCHOR = '# <<< dsh-mcpserver-manager:managed:end';
 const BEGIN_RE = /^#\s*>>>\s*dsh-mcpserver-manager:managed:begin\b/;
 const END_RE = /^#\s*<<<\s*dsh-mcpserver-manager:managed:end\b/;
 
-/** 条目级键的缩进（顶层序列项下的直接子键）。 */
+/** 条目级键相对条目首行的缩进（`- ` 之后下一层的直接子键）。 */
 const ITEM_INDENT = 2;
+
+/** 顶层插入包装行：`- insert:`，且**没有**内联值。 */
+const INSERT_RE = /^-\s+insert\s*:\s*$/;
 
 /**
  * 造一个带错误码的 Error。
@@ -164,13 +168,75 @@ export function itemSpans(lines) {
 }
 
 /**
- * 取一个顶层条目的 `id`（用于 id 撞车检测）。
+ * 把顶层区间展开成**条目**区间。
+ *
+ * 为什么要多这一层：`cordis.patch.yml` 是**补丁列表**，不是条目列表。一个条目
+ * 只有写在 `- insert:` 下面才会被真正建行（见 `serializeInsertEntry` 的长注释）。
+ * 于是同一个文件里会同时存在两种形状：
+ *
+ * ```yaml
+ * - insert:              # ← 正确：插进去
+ *     - id: mcp-a
+ *       name: '@deepseek-ai/dsh-mcp-client'
+ *
+ * - id: mcp-b            # ← 0.4.2 及之前本插件写的错误形状：改一个不存在的行
+ *   name: '@deepseek-ai/dsh-mcp-client'
+ * ```
+ *
+ * 两种都得认得出来——旧形状要能被列出来、被编辑、被修复（见 store 的 `repair`），
+ * 否则用户在界面上会看到"这条 MCP 消失了"，而它其实还躺在文件里。
+ *
  * @param {string[]} lines 行数组。
- * @param {{start: number, end: number}} span 条目区间。
+ * @returns {Array<{start: number, end: number, baseIndent: number, wrapper: {start: number, end: number, count: number}|null}>} 条目区间。
+ *   `baseIndent` 是条目 `- ` 所在的列；`wrapper` 非空表示它在一个 `- insert:` 里。
+ */
+export function entrySpans(lines) {
+  /** @type {Array<{start: number, end: number, baseIndent: number, wrapper: {start: number, end: number, count: number}|null}>} */
+  const entries = [];
+  for (const span of itemSpans(lines)) {
+    if (!INSERT_RE.test(lines[span.start].trim())) {
+      // 扁平条目（旧版本插件的写法，或用户手写的"改配置"补丁）。
+      entries.push({ start: span.start, end: span.end, baseIndent: 0, wrapper: null });
+      continue;
+    }
+    // `- insert:` 包装：里面的条目是缩进更深的 `- ` 行。子条目缩进取**最小**的
+    // 那一层——`config.args` 这类块序列缩进更深，不能当成条目。
+    let childIndent = -1;
+    for (let i = span.start + 1; i < span.end; i += 1) {
+      const line = lines[i];
+      if (line.trim() === '' || !/^-\s/.test(line.trimStart())) continue;
+      const indent = lineIndentStart(line);
+      if (childIndent === -1 || indent < childIndent) childIndent = indent;
+    }
+    if (childIndent <= 0) continue;
+    /** @type {Array<{start: number, end: number}>} */
+    const children = [];
+    let start = -1;
+    for (let i = span.start + 1; i < span.end; i += 1) {
+      const line = lines[i];
+      if (line.trim() === '') continue;
+      if (lineIndentStart(line) !== childIndent || !/^-\s/.test(line.trimStart())) continue;
+      if (start !== -1) children.push({ start, end: tighten(lines, start, i) });
+      start = i;
+    }
+    if (start !== -1) children.push({ start, end: tighten(lines, start, span.end) });
+    const wrapper = { start: span.start, end: span.end, count: children.length };
+    for (const child of children) {
+      entries.push({ start: child.start, end: child.end, baseIndent: childIndent, wrapper });
+    }
+  }
+  return entries;
+}
+
+/**
+ * 取一个条目的 `id`（用于 id 撞车检测）。
+ * @param {string[]} lines 行数组。
+ * @param {{start: number, end: number, baseIndent?: number}} span 条目区间。
  * @returns {string|null} id；解析不出返回 null。
  */
 function extractId(lines, span) {
-  const inline = splitPair(lines[span.start].replace(/^-\s+/, ''));
+  const keyIndent = (span.baseIndent ?? 0) + ITEM_INDENT;
+  const inline = splitPair(lines[span.start].trimStart().replace(/^-\s+/, ''));
   if (inline !== null && inline.key === 'id') {
     const value = parseScalar(inline.value).value;
     return typeof value === 'string' && value !== '' ? value : null;
@@ -178,7 +244,7 @@ function extractId(lines, span) {
   for (let i = span.start + 1; i < span.end; i += 1) {
     const line = lines[i];
     if (line.trim() === '') continue;
-    if (line.length - line.trimStart().length !== ITEM_INDENT) continue;
+    if (lineIndentStart(line) !== keyIndent) continue;
     const pair = splitPair(line.trimStart());
     if (pair === null || pair.key !== 'id') continue;
     const value = parseScalar(pair.value).value;
@@ -205,16 +271,19 @@ export function parseItem(lines, span, anchor, newline = '\n') {
   const itemKeys = [];
   let configLineIdx = -1;
   let configInline = null;
+  // 条目可能缩进（写在 `- insert:` 下面），键相对条目首行的偏移固定是 2。
+  const baseIndent = span.baseIndent ?? 0;
+  const keyIndent = baseIndent + ITEM_INDENT;
 
   for (let i = span.start; i < span.end; i += 1) {
     let text = lines[i];
-    let indent = ITEM_INDENT;
+    let indent = keyIndent;
     if (i === span.start) {
-      text = text.replace(/^-\s+/, '');
+      text = text.trimStart().replace(/^-\s+/, '');
     } else {
       if (text.trim() === '') continue;
       indent = lineIndentStart(text);
-      if (indent < ITEM_INDENT) continue;
+      if (indent < keyIndent) continue;
       text = text.trimStart();
     }
     if (text.startsWith('#')) continue;
@@ -225,7 +294,7 @@ export function parseItem(lines, span, anchor, newline = '\n') {
       configInline = pair.value.trim() === '' ? null : pair.value.trim();
       continue;
     }
-    if (indent === ITEM_INDENT) itemKeys.push({ key: pair.key, value: pair.value.trim(), lineIndex: i });
+    if (indent === keyIndent) itemKeys.push({ key: pair.key, value: pair.value.trim(), lineIndex: i });
   }
 
   // 只认 MCP 客户端条目：其它插件的条目只参与 id 撞车检测，不进列表。
@@ -246,7 +315,7 @@ export function parseItem(lines, span, anchor, newline = '\n') {
       const line = lines[i];
       if (line.trim() === '') continue;
       const indent = lineIndentStart(line);
-      if (indent <= ITEM_INDENT) break;
+      if (indent <= keyIndent) break;
       children.push({ line, indent, index: i });
     }
     let minIndent = Number.POSITIVE_INFINITY;
@@ -365,7 +434,9 @@ export function parseItem(lines, span, anchor, newline = '\n') {
     parsable,
     raw: redactSecretValues(lines.slice(span.start, span.end).join(newline)),
     disabledBy,
-    span: { start: span.start, end: span.end },
+    // 区间必须带上 `baseIndent` 与 `wrapper`：下游的 `applyDisable` 靠前者算键缩进，
+    // `spliceEntry` 靠后者判断"删掉这条要不要连 `- insert:` 一起删"。
+    span: { start: span.start, end: span.end, baseIndent, wrapper: span.wrapper ?? null },
   };
   // 原始 config 对象（**含 env / headers 明文**）只挂在**不可枚举**属性上。
   //
@@ -394,26 +465,37 @@ function lineIndentStart(line) {
  * 都要能被看见，只是 `managed: false`（只读）。
  *
  * @param {string} text 文件全文。
- * @returns {{items: object[], ids: string[], anchors: 'ok'|'missing'|'broken', beginLine: number, endLine: number, newline: string}} 扫描结果。
+ * @returns {{items: object[], ids: string[], legacy: string[], anchors: 'ok'|'missing'|'broken', beginLine: number, endLine: number, newline: string}} 扫描结果。
+ *   `legacy` 是"本插件 0.4.2 及之前写坏了的条目"（serverName 列表）：它们是扁平顶层
+ *   条目，DSH 永远不会加载，需要 `repair()` 修成 `- insert:` 形状。
  */
 export function scan(text) {
   const newline = detectNewline(text);
   const lines = splitLines(text);
   const anchor = findAnchors(lines);
-  const spans = itemSpans(lines);
   /** @type {object[]} */
   const items = [];
   /** @type {string[]} */
   const ids = [];
-  for (const span of spans) {
+  /** @type {string[]} */
+  const legacy = [];
+  for (const span of entrySpans(lines)) {
     const id = extractId(lines, span);
     if (id !== null) ids.push(id);
     const item = parseItem(lines, span, anchor, newline);
-    if (item !== null) items.push(item);
+    if (item === null) continue;
+    items.push(item);
+    // 判据比"扁平"再严一格：id 必须正好是我们生成的那个 `mcp-<serverName>`。
+    // 用户手写的扁平补丁可能是在改某个 bundle 已声明的条目（那种是对的），
+    // 不能一并报成待修复。
+    if (item.managed === true && span.wrapper === null && id === `mcp-${item.serverName}`) {
+      legacy.push(item.serverName);
+    }
   }
   return {
     items,
     ids,
+    legacy,
     anchors: anchor.state,
     beginLine: anchor.beginLine,
     endLine: anchor.endLine,
@@ -495,6 +577,30 @@ export function insertEntry(text, entryLines) {
 }
 
 /**
+ * 替换/删除一个条目区间，并**正确处理 `- insert:` 包装**。
+ *
+ * 三种情形：
+ * - 条目在包装里、且包装只装了它这一条 → 连包装一起换掉/删掉（本插件写的都是
+ *   这种"一条一个包装"）。只删内层会留下一句光秃秃的 `- insert:`，那是坏 YAML；
+ * - 条目在包装里、包装装了好几条（用户手写） → 只动内层，别碰别人的条目；
+ * - 扁平条目 → 直接换。
+ *
+ * @param {string[]} lines 行数组（原地修改）。
+ * @param {object} target 条目（必须带 `span`）。
+ * @param {string[]} replacement 替换行；空数组表示删除。
+ * @returns {void}
+ */
+function spliceEntry(lines, target, replacement) {
+  const span = target.span;
+  const wrapper = span.wrapper ?? null;
+  if (wrapper !== null && wrapper.count === 1) {
+    lines.splice(wrapper.start, wrapper.end - wrapper.start, ...replacement);
+    return;
+  }
+  lines.splice(span.start, span.end - span.start, ...replacement);
+}
+
+/**
  * 按 serverName 移除受管段内的条目。
  * @param {string} text 文件全文。
  * @param {string} serverName 身份键。
@@ -507,26 +613,68 @@ export function removeEntry(text, serverName) {
   );
   if (target === undefined) return null;
   const lines = splitLines(text);
-  lines.splice(target.span.start, target.span.end - target.span.start);
+  spliceEntry(lines, target, []);
   return lines.join(newline);
 }
 
 /**
  * 替换受管段内同名条目（编辑用）。
+ *
+ * 新内容一律按 `- insert:` 形状渲染——**编辑一次就顺带修好形状**。0.4.2 及之前
+ * 写出的扁平条目 DSH 根本不会加载，用户"改了个 url 发现还是 0 个工具"比保持
+ * 形状一致要糟糕得多。唯一例外：条目是**用户手写的多条目 `- insert:` 包装**里
+ * 的一条，那就只替换内层，别去动别人的条目结构。
+ *
  * @param {string} text 文件全文。
  * @param {string} serverName 身份键。
- * @param {string[]} entryLines 新条目行。
+ * @param {object} entry 条目对象（`serialize` 需要的形状）。
  * @returns {string|null} 结果文本；段内不存在返回 null。
  */
-export function replaceEntry(text, serverName, entryLines) {
+export function replaceEntry(text, serverName, entry) {
   const newline = detectNewline(text);
   const target = scan(text).items.find(
     (item) => item.managed === true && item.serverName === serverName,
   );
   if (target === undefined) return null;
   const lines = splitLines(text);
-  lines.splice(target.span.start, target.span.end - target.span.start, ...entryLines);
+  const wrapper = target.span.wrapper ?? null;
+  const replacement = wrapper !== null && wrapper.count > 1
+    ? serializeEntry(entry, ' '.repeat(target.span.baseIndent))
+    : serializeInsertEntry(entry);
+  spliceEntry(lines, target, replacement);
   return lines.join(newline);
+}
+
+/**
+ * 把受管段内所有"扁平旧形状"条目改写成 `- insert:` 包装。
+ *
+ * 这是 0.4.3 的一次性数据修复：0.4.2 及之前写出的条目 DSH 根本不会加载，
+ * 光改代码不会让它们开始工作。修复只碰**受管段内、id 正好是 `mcp-<serverName>`**
+ * 的条目（见 `scan` 的 `legacy`），段外与别人的条目一个字节都不动。
+ *
+ * @param {string} text 文件全文。
+ * @returns {{next: string|null, repaired: number}} `next === null` 表示没有需要修的。
+ */
+export function repairEntries(text) {
+  const newline = detectNewline(text);
+  const scanned = scan(text);
+  const targets = scanned.items.filter(
+    (item) => item.managed === true && scanned.legacy.includes(item.serverName),
+  );
+  if (targets.length === 0) return { next: null, repaired: 0 };
+  const lines = splitLines(text);
+  // 从后往前改：前面的区间行号才不会因为后面的增删而漂移。
+  const ordered = [...targets].sort((left, right) => right.span.start - left.span.start);
+  for (const item of ordered) {
+    const entry = {
+      id: item.id ?? `mcp-${item.serverName}`,
+      name: MCP_CLIENT_NAME,
+      disabled: item.enabled !== true,
+      config: item.parsed ?? {},
+    };
+    lines.splice(item.span.start, item.span.end - item.span.start, ...serializeInsertEntry(entry));
+  }
+  return { next: lines.join(newline), repaired: targets.length };
 }
 
 /**
@@ -552,20 +700,21 @@ export function applyDisable(text, serverName, disabled, insertedByUs = false) {
   if (target === undefined) return null;
   const lines = splitLines(text);
   const { start, end } = target.span;
+  const keyIndent = (target.span.baseIndent ?? 0) + ITEM_INDENT;
   let disabledIdx = -1;
   let configIdx = -1;
   let lastKeyIdx = -1;
   for (let i = start + 1; i < end; i += 1) {
     const line = lines[i];
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue;
-    if (lineIndentStart(line) !== ITEM_INDENT) continue;
+    if (lineIndentStart(line) !== keyIndent) continue;
     const pair = splitPair(line.trimStart());
     if (pair === null) continue;
     lastKeyIdx = i;
     if (pair.key === 'disabled' && disabledIdx === -1) disabledIdx = i;
     if (pair.key === 'config' && configIdx === -1) configIdx = i;
   }
-  const pad = ' '.repeat(ITEM_INDENT);
+  const pad = ' '.repeat(keyIndent);
   if (disabled) {
     if (disabledIdx !== -1) {
       lines[disabledIdx] = `${pad}disabled: true`;
@@ -804,6 +953,9 @@ export function createPatchStore(options = {}) {
       checksum: checksumOf(before.text),
       anchors: scanned.anchors,
       items: scanned.items,
+      // 0.4.2 及之前写出的条目是扁平形状，DSH 的补丁语义不会把它们建行
+      // （详见 `serializeInsertEntry`）。页面据此提示"可以一键修复"。
+      legacy: scanned.legacy,
       taken: {
         serverNames: scanned.items
           .map((item) => item.serverName)
@@ -829,7 +981,7 @@ export function createPatchStore(options = {}) {
         disabled: disabled === true,
         config: clientConfig,
       };
-      const next = insertEntry(text, serializeEntry(entry));
+      const next = insertEntry(text, serializeInsertEntry(entry));
       // 这一行 `disabled` 是插件自己写的：后续"启用"应该删掉整行，而不是
       // 留一行 `disabled: false` 在用户文件里。
       if (disabled === true) insertedDisabled.add(serverName);
@@ -948,7 +1100,7 @@ export function createPatchStore(options = {}) {
         disabled: keepDisabled,
         config: merged,
       };
-      const next = replaceEntry(text, serverName, serializeEntry(entry));
+      const next = replaceEntry(text, serverName, entry);
       if (next === null) throw codedError('unknown-server', '该条目已不存在，请刷新列表');
       // `disabled` 行的归属记账跟着条目走：旧名字上的记录作废，新名字按"原来
       // 有没有这个键"重新记——否则改名后"启用"会写回一行 `disabled: false`。
@@ -1008,10 +1160,32 @@ export function createPatchStore(options = {}) {
       return { next, payload: { item, changed: true } };
     });
 
+  /**
+   * 一次性修复：把受管段内 0.4.2 及之前写坏的扁平条目改成 `- insert:` 形状。
+   *
+   * 为什么要单独一个动作而不是"读的时候顺手改"：`read()` 的纪律是**只读**，
+   * 打开设置页就悄悄重写用户的 `cordis.patch.yml` 是不可接受的。修复是有边界
+   * 的显式操作（只碰受管段内、id 正好是 `mcp-<serverName>` 的条目），走同一套
+   * 备份 + 原子写 + 回滚。
+   *
+   * @returns {Promise<{repaired: number, items: object[], revision: number, checksum: string}>} 修复条数与新快照。
+   */
+  const repair = async () =>
+    mutate((text) => {
+      const scanned = scan(text);
+      requireHealthyAnchors(scanned);
+      const { next, repaired } = repairEntries(text);
+      if (next === null) {
+        return { next: null, payload: { repaired: 0, items: scanned.items } };
+      }
+      return { next, payload: { repaired, items: scan(next).items } };
+    });
+
   return {
     read,
     add,
     replace,
+    repair,
     configSource,
     remove,
     setEnabled,

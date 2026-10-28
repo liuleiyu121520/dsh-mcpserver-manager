@@ -38,6 +38,8 @@ export const UPDATE_PATH = `${PREFIX}/update`;
 export const UPDATE_CHECK_PATH = `${UPDATE_PATH}/check`;
 /** 原地升级（GET 进度 / POST 开始）。 */
 export const UPGRADE_PATH = `${PREFIX}/upgrade`;
+/** 修复旧版写坏的条目形状（一次性数据迁移）。 */
+export const REPAIR_PATH = `${PREFIX}/repair`;
 
 /** POST body 上限：配置再长也长不过一块剪贴板。 */
 export const MAX_BODY_BYTES = 256 * 1024;
@@ -274,6 +276,10 @@ export function registerRoutes(ctx, store, logger = () => {}, options = {}) {
         source: snapshot.source,
         exists: snapshot.exists,
         anchors: snapshot.anchors,
+        // 旧版（≤0.4.2）写出的条目是扁平形状，DSH 的补丁语义不会把它们建行。
+        // 这不是"条目不存在"，而是"存在但不会被加载"——必须明说，否则用户
+        // 只会看到"共 0 个工具"而完全不知道为什么。
+        legacy: snapshot.legacy ?? [],
         items: withToolCounts(snapshot.items, toolServiceOf(ctx)),
         // 前端做即时唯一性校验需要「已占用的名字」：serverName 是工具 namespace，
         // 撞了就是撞了，所以这里给的是**全文件**的可解析条目（含只读条目）。
@@ -388,6 +394,17 @@ export function registerRoutes(ctx, store, logger = () => {}, options = {}) {
       return;
     }
     throw codedError('method-not-allowed', 'DELETE or POST only');
+  });
+
+  // POST /repair —— 把旧版写坏的扁平条目改成 `- insert:` 形状（一次性数据修复）。
+  //
+  // 为什么值得单独一条路由：光改代码不会让已经写坏的条目开始工作。用户升级后
+  // 打开这一页，看到的就是「共 0 个工具」，除非有一条明确的路可以走。
+  register('exact', REPAIR_PATH, async (req, res) => {
+    if (req.method !== 'POST') throw codedError('method-not-allowed', 'POST only');
+    const repaired = await store.repair();
+    logger(`repair entries=${String(repaired.repaired)}`);
+    sendOk(res, 200, { repaired: repaired.repaired, items: repaired.items }, repaired.revision);
   });
 
   if (updater === null) return;

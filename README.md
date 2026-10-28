@@ -10,7 +10,7 @@
 
 - **粘贴一段 JSON 就能接入**：弹窗里贴配置，输入即时校验，通过后才写盘，写完列表立刻回显并高亮 1.5 秒
 - **认 Claude / Cursor 的 `{ "mcpServers": { … } }` 形状**：集合键自动当 `serverName`，`transportType` / `type` 自动映射成 `transport`，`sse` 自动落成 `streamable-http`（DSH 没有 SSE 实现）并给出提示——从别家文档复制过来的配置**不用手改**
-- **写入官方配置文件**：写进**当前宿主 profile** 的 `cordis.patch.yml`（例如 desktop 宿主即 `~/.dsh/profiles/desktop/cordis.patch.yml`），按 `name: '@deepseek-ai/dsh-mcp-client'` 的官方条目格式插入，宿主 `patchReload: live` 自动热重载，**不用重启**
+- **写入官方配置文件，且形状是对的**：写进**当前宿主 profile** 的 `cordis.patch.yml`（例如 desktop 宿主即 `~/.dsh/profiles/desktop/cordis.patch.yml`），按官方补丁格式 `- insert:` 插入（`cordis.patch.yml` 是**补丁列表**，顶层裸条目只会被当成"改已存在条目"，找不到目标就被静默跳过——0.4.2 及之前本插件踩的就是这个坑）
 - **绝不破坏你的配置文件**：受管段落 + 文本级行编辑 + 原子写 + `.bak` 备份 + 失败自动回滚，**段外一个字节都不动**
 - **前后端同一套校验规则**：前后端共用同一个 `src/validate.js`，前端判过的一定能过后端；JSON 语法错能报出「第 N 行第 M 列」
 - **秘密脱敏**：列表与回显里只出现 `env` / `headers` 的**键名**（`GITHUB_TOKEN ••••`、`Authorization ••••`），明文永不越过 Host 边界
@@ -268,7 +268,7 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 └──────────────────────────┬─────────────────────────────────────┘
                      HTTP  /api/dsh-mcpserver-manager/*
 ┌──────────────────────────┴──────── Host 半（Node ESM）─────────┐
-│ index.js → routes.js（守卫 + 10 端点）                         │
+│ index.js → routes.js（守卫 + 11 端点）                         │
 │              ├→ patch-store.js ─┬→ paths.js（路径解析）        │
 │              │                  ├→ serialize.js（→ YAML）      │
 │              │                  └→ validate.js（同源校验）     │
@@ -283,6 +283,26 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 **为什么健康检查要带密钥探测**：`headers` 里通常就是 API key，而早期版本刻意只发 `content-type` / `accept`——代价是整个探测对**需要鉴权的服务**失去意义：它永远只能回一句"401 需要鉴权"，用户明明配好了 header。真正该回答的问题是"我配的这个 header 到底生不生效"，所以现在照配置发，并把 401 拆成三句（没配 / 配了但被我们关掉了发送 / 配了却被拒）。风险靠三件事收住：只发往用户自己写的那个 `url`、`redirect: 'manual'` 不跟随跳转（否则 302 会把密钥带到别的域名）、日志与快照里永不出现值。同理，`stdio` 只能确认"命令在 PATH 里"，所以那种情况判 `需留意` 而不是 `正常`——命令存在但一个工具都没注册，正是启动失败的样子。
 
 **为什么还要多问一次 `tools/list`**：`toolCount === 0` 时，"服务端本来没工具"和"DSH 没连上"在界面上长得一模一样，而这两种情况用户要做的操作完全相反。多走两步（`notifications/initialized` + `tools/list`）就能把服务端的数字拿回来，于是可以说"服务端有 42 个、DSH 注册了 0 个：重启 DSH"——而不是让用户去改一个本来就正确的配置。这一步只在工具数为 0 时发生，且任何一步失败都只降级成"不知道"，不把自己变成新的失败源。
+
+**为什么条目必须包在 `- insert:` 里**（0.4.3 的根因修复）：`cordis.patch.yml` 是**补丁列表**，不是条目列表。宿主合成配置时跑的是 `@deepseek-ai/cordis-plugin-include` 的 `applyEntryPatches()`：
+
+```js
+const { id, insert, name, ...overrides } = patch;
+if (insert) { data.push(...insert); continue; }                    // 建行
+const target = entryMap.get(id);
+if (!target) { warn('patch: entry %C not found'); continue; }      // 改行：找不到就吞掉
+```
+
+而 profile 的补丁是 apply 在**空根**上的，所以"顶层直接写一条 `- id: mcp-x`"永远找不到目标：它只换来一条 logger warning，插件根本没被挂载。症状极具迷惑性——配置文件看着完全正确、健康检查 200、服务端 42 个工具，而 DSH 里 **0 个**，并且一声不响。正确形状是：
+
+```yaml
+- insert:
+    - id: mcp-creis_mcp_server
+      name: '@deepseek-ai/dsh-mcp-client'
+      config: { … }
+```
+
+0.4.3 起新增的条目都按这个形状写；已存在的旧形状条目会在列表页顶部被点名，点「修复」一次性迁移（`POST /repair`，只碰受管段内、id 正好是 `mcp-<serverName>` 的条目，走同一套备份 + 原子写）。编辑一条旧形状条目也会顺手把它修正。
 
 **为什么不用 YAML 库**：目标文件里可能有用户注释和 cordis 私有的 `!!js` tag，任何「解析 → 改对象 → 全量 dump」都会把 `!!js process.env.TOKEN` 静默写成字面量——那是不可逆的用户资产损坏。所以本插件自研了一个**受管段感知的行编辑器**：只在自己的锚点段内做字符串拼接式增删，段外字节不变（这一点由单测逐断言覆盖）。
 
@@ -332,7 +352,10 @@ npm run build && npm run check && npm test
 → 故意的：空列表刷新不会带来任何变化，而「添加 MCP」在空态卡片里已经有一个。加完第一条 MCP 之后刷新与添加就都出现了。
 
 **健康检查说「服务端有 42 个工具，但 DSH 注册了 0 个」**
-→ 这说明**你的配置和密钥都是对的**（探测带着它们走完了 `initialize` 和 `tools/list`），卡住的是宿主这一侧的连接。`@deepseek-ai/dsh-mcp-client` 在连接失败时只写日志、不弹窗（`failOnStartupError` 默认 `false`），所以界面上一片安静。重启 DSH 让它重新加载该条目即可；重启后仍为 0 就去对话里让它真的调一次这个服务器的工具，那次失败会把真正的原因带出来。
+→ 先说结论：**你的配置和密钥都是对的**（探测带着它们走完了 `initialize` 和 `tools/list`）。剩下的可能是两件事——
+
+1. **条目形状是旧版的**（≤0.4.2 写入的条目在顶层，宿主不会加载）。看列表页顶部有没有那条黄色提示；有就点「修复」，然后重启 DSH。
+2. 形状已对但连接没建立。`@deepseek-ai/dsh-mcp-client` 连接失败时只写日志、不弹窗（`failOnStartupError` 默认 `false`），所以界面上一片安静。重启 DSH 让它重新加载该条目；仍为 0 就去对话里让它真的调一次这个服务器的工具，那次失败会把真正的原因带出来。
 
 **工具数是「共 0 个工具」或「工具数未知」，是插件坏了吗**
 → 都不是。「共 0 个工具」= 宿主此刻确实一个都没注册（点一下健康检查能分清是服务端没工具、还是 DSH 没连上）；「工具数未知」= 宿主没提供 `tools` 服务（多半是 Host 还是旧版本）。

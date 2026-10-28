@@ -23,6 +23,7 @@ import {
   readServerConfig,
   readUpgradeState,
   removeServer,
+  repairEntries,
   toggleServer,
 } from './api.js';
 import { CSS } from './styles.js';
@@ -83,6 +84,7 @@ export function McpManager() {
   const [update, setUpdate] = useState(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
+  const [repairing, setRepairing] = useState(false);
 
   /**
    * 弹一条短提示。用对象而不是字符串：连着两次同样的文案也要重新计时。
@@ -164,6 +166,8 @@ export function McpManager() {
   const fileDisplay = typeof snapshot?.fileDisplay === 'string' ? snapshot.fileDisplay : '';
   const taken = snapshot?.taken ?? { serverNames: [], ids: [] };
   const anchorsBroken = snapshot?.anchors === 'broken';
+  // 旧版写坏的条目（扁平顶层，宿主不会加载）。Host < 0.4.3 不返回这个字段。
+  const legacy = Array.isArray(snapshot?.legacy) ? snapshot.legacy : [];
   // 页面刷新就会换新的 bundle，Host 却只在进程启动时加载一次。两者版本不一致
   // 意味着"升级了但没重启"，此时两边校验规则不同，用户会看到互相矛盾的提示。
   const hostVersion = typeof snapshot?.version === 'string' ? snapshot.version : '';
@@ -420,6 +424,31 @@ export function McpManager() {
     }
   };
 
+  /**
+   * 修复旧版写坏的条目形状。
+   *
+   * 0.4.2 及之前把条目直接写在顶层，而 `cordis.patch.yml` 是**补丁列表**——
+   * 顶层那条只会被当成"给某个已存在条目改配置"，找不到目标就静默跳过。于是
+   * 配置看起来全对、DSH 里一个工具都没有。光换代码不会让这些条目开始工作，
+   * 必须有一步显式的迁移。
+   * @returns {Promise<void>} 完成即 resolve。
+   */
+  const onRepair = async () => {
+    if (repairing === true) return;
+    setRepairing(true);
+    try {
+      const data = await repairEntries();
+      setBanner('');
+      await refresh();
+      const count = typeof data.repaired === 'number' ? data.repaired : 0;
+      notify(`已修复 ${count} 条，重启 DSH 后生效`);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   return (
     <div className="dshmcp-page">
       <style>{CSS}</style>
@@ -508,6 +537,25 @@ export function McpManager() {
           </div>
         </div>
       ) : null}
+
+      {legacy.length === 0 ? null : (
+        <div className="dshmcp-banner is-warn" role="alert">
+          <WarningIcon />
+          <div className="dshmcp-banner-body">
+            <div>
+              有 {legacy.length} 条条目是旧版写入的，DSH 不会加载
+              {legacy.length <= 3 ? `（${legacy.join('、')}）` : ''}
+            </div>
+            <div className="dshmcp-banner-note">
+              0.4.2 及之前把条目直接写在顶层，而配置文件要的是「- insert:」补丁形状；宿主找不到目标条目就静默跳过了。
+              修复只动本插件受管段内的条目，段外一个字节不变。
+            </div>
+          </div>
+          <button type="button" className="dshmcp-btn" disabled={repairing === true} onClick={onRepair}>
+            {repairing === true ? '修复中…' : '修复'}
+          </button>
+        </div>
+      )}
 
       {phase === 'loading' ? (
         <div>

@@ -261,6 +261,13 @@ export const CSS = `
   border-left-color: var(--dsw-alias-state-business-primary, #2563eb);
 }
 
+/* 旧形状条目提示：这是"能用但还没生效"，用警告色而不是错误红——没坏，
+   只差一次迁移。 */
+.dshmcp-banner.is-warn {
+  color: var(--dsw-alias-state-warning-primary, #b45309);
+  border-left-color: var(--dsw-alias-state-warning-primary, #b45309);
+}
+
 /* 操作结果提示：底部居中，短、可读、自己消失，不需要用户关。 */
 .dshmcp-toast {
   position: fixed; left: 50%; bottom: 24px; z-index: 60;

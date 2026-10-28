@@ -241,6 +241,33 @@ export function serializeEntry(entry, indent = '') {
 }
 
 /**
+ * 把一个条目渲染成**能被 loader 真正插入的**补丁行。
+ *
+ * 为什么必须包一层 `- insert:`：`cordis-patch.yml` 是**补丁列表**，不是条目列表。
+ * `applyEntryPatches()` 的实际语义是——
+ *
+ * ```js
+ * const { id, insert, name, ...overrides } = patch;
+ * if (insert) { data.push(...insert); continue; }      // 建行
+ * const target = entryMap.get(id);
+ * if (!target) { warn('patch: entry %C not found'); continue; }  // 改行：找不到就跳过
+ * ```
+ *
+ * 也就是说：**顶层直接写 `- id/name/config` 只会被当成"给某个已存在行改配置"**，
+ * 而 profile 的补丁是 apply 在**空根**上的（见 `prepareProfilePatches`），
+ * 所以那个 id 永远不存在 → 只留一条 logger warning → 插件根本没被挂载 →
+ * 服务端明明有工具，DSH 里一个都没注册。0.4.3 之前本插件写的就是这个错误形状。
+ *
+ * 官方模板（`dsh-agent-preset/.../templates/mcp/cordis.patch.yml`）也是这个形状。
+ *
+ * @param {{id: string, name?: string, disabled?: boolean, config: Record<string, unknown>}} entry 条目。
+ * @returns {string[]} YAML 行数组（不含换行符）。
+ */
+export function serializeInsertEntry(entry) {
+  return ['- insert:', ...serializeEntry(entry, '    ')];
+}
+
+/**
  * 把流样式 `env: {...}` 里的值替换成脱敏占位符（保留 key）。
  * @param {string} inner 花括号内的文本。
  * @returns {string} 重建后的流样式文本（含花括号）。

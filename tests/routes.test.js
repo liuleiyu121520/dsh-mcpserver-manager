@@ -11,7 +11,16 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { apply } from '../src/index.js';
 import { BEGIN_ANCHOR, END_ANCHOR, createPatchStore } from '../src/patch-store.js';
-import { PREFIX, SERVERS_PATH, UPDATE_CHECK_PATH, UPDATE_PATH, UPGRADE_PATH, registerRoutes, serverNameFromPath } from '../src/routes.js';
+import {
+  PREFIX,
+  REPAIR_PATH,
+  SERVERS_PATH,
+  UPDATE_CHECK_PATH,
+  UPDATE_PATH,
+  UPGRADE_PATH,
+  registerRoutes,
+  serverNameFromPath,
+} from '../src/routes.js';
 import { PLUGIN_VERSION } from '../src/version.js';
 
 /** @type {string} */
@@ -130,6 +139,7 @@ describe('routes · 端点与信封', () => {
       [
         `exact ${SERVERS_PATH}`,
         `prefix ${SERVERS_PATH}`,
+        `exact ${REPAIR_PATH}`,
         `exact ${UPDATE_PATH}`,
         `exact ${UPDATE_CHECK_PATH}`,
         `exact ${UPGRADE_PATH}`,
@@ -584,8 +594,8 @@ describe('routes · 装配层读宿主 profileContext（BUG-2 回归）', () => 
     /** @type {Array<{kind: string, path: string, handler: Function}>} */
     const table = [];
     assert.doesNotThrow(() => apply(createCtx(table), { dshHome: dir }));
-    // 2 条 servers + 3 条版本（版本路由不依赖 ctx.get，注册时不探测服务）。
-    assert.equal(table.length, 5);
+    // 2 条 servers + 1 条 repair + 3 条版本（版本路由不依赖 ctx.get，注册时不探测服务）。
+    assert.equal(table.length, 6);
   });
 });
 
@@ -1121,5 +1131,64 @@ describe('routes · 版本检查端点', () => {
     } finally {
       env.close();
     }
+  });
+});
+
+describe('routes · legacy 上报与 POST /repair', () => {
+  /** 这一组用**独立的**临时目录与路由表，不干扰上面共享的 fixture。 */
+  const withLegacyFile = async (run) => {
+    const own = mkdtempSync(join(tmpdir(), 'dshmcp-repair-'));
+    try {
+      const file = join(own, 'cordis.patch.yml');
+      writeFileSync(
+        file,
+        [
+          '# patch',
+          BEGIN_ANCHOR,
+          "- id: 'mcp-flat'",
+          "  name: '@deepseek-ai/dsh-mcp-client'",
+          '  config:',
+          "    serverName: 'flat'",
+          "    transport: 'stdio'",
+          "    command: 'npx'",
+          END_ANCHOR,
+          '',
+        ].join('\n'),
+      );
+      const table = [];
+      const store = createPatchStore({ filePath: file });
+      registerRoutes(createCtx(table), store, () => {});
+      await run({ file, table });
+    } finally {
+      rmSync(own, { recursive: true, force: true });
+    }
+  };
+
+  it('GET /servers 明确上报 legacy（不是让用户自己去猜"为什么 0 个工具"）', async () => {
+    await withLegacyFile(async ({ table }) => {
+      const list = await dispatch(table, 'GET', SERVERS_PATH);
+      assert.equal(list.statusCode, 200);
+      assert.deepEqual(list.payload.data.legacy, ['flat']);
+      assert.equal(list.payload.data.items.length, 1, '条目本身照常列出来，用户要能看到它');
+    });
+  });
+
+  it('POST /repair 改写成 insert 形状，并回传修复条数', async () => {
+    await withLegacyFile(async ({ file, table }) => {
+      const repaired = await dispatch(table, 'POST', REPAIR_PATH, '{}');
+      assert.equal(repaired.statusCode, 200);
+      assert.equal(repaired.payload.data.repaired, 1);
+      const text = readFileSync(file, 'utf8');
+      assert.ok(text.includes('\n- insert:\n'), text);
+      const after = await dispatch(table, 'GET', SERVERS_PATH);
+      assert.deepEqual(after.payload.data.legacy, [], '修完就该不再上报');
+    });
+  });
+
+  it('GET /repair → 405（只接受 POST）', async () => {
+    await withLegacyFile(async ({ table }) => {
+      const got = await dispatch(table, 'GET', REPAIR_PATH);
+      assert.equal(got.statusCode, 405);
+    });
   });
 });

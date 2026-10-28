@@ -233,6 +233,17 @@ export function checkServerHealth(serverName) {
 }
 
 /**
+ * POST /repair —— 把旧版（≤0.4.2）写坏的扁平条目改成 `- insert:` 形状。
+ *
+ * 为什么不自动做：`GET /servers` 的纪律是只读，打开设置页就悄悄重写用户的
+ * `cordis.patch.yml` 不可接受。修复必须是用户点出来的显式动作。
+ * @returns {Promise<object>} `{repaired, items}`。
+ */
+export function repairEntries() {
+  return request('/repair', { method: 'POST', body: '{}' });
+}
+
+/**
  * GET /update —— 版本检查的缓存结论（不触发网络请求）。
  * @returns {Promise<object>} 结论。
  */

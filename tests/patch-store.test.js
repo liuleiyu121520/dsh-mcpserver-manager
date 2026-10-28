@@ -826,9 +826,9 @@ describe('patch-store · Claude 格式落盘（{ mcpServers: { … } }）', () =
     assert.equal(added.item.enabled, false);
     assert.equal(added.item.disabledBy, 'native-key');
     const text = fs.readFileSync(path, 'utf8');
-    // 缩进 2 空格 = 条目级；缩进 4 空格才会是 config 子键。
-    assert.ok(text.includes('\n  disabled: true\n'), text);
-    assert.equal(text.includes('    disabled:'), false, 'disabled 不许写进 config 子树');
+    // 条目在 `- insert:` 里 → 条目首行缩进 4，条目级键缩进 6，config 子键缩进 8。
+    assert.ok(text.includes('\n      disabled: true\n'), text);
+    assert.equal(text.includes('\n        disabled:'), false, 'disabled 不许写进 config 子树');
   });
 
   it('disabled:true 加进来的条目，启用时整行删掉（那行是我们写的）', async () => {
@@ -1054,5 +1054,149 @@ describe('patch-store · restoreSecretValues（纯函数）', () => {
     const merged = restoreSecretValues({ env: { A: '' } }, { env: {} });
     assert.equal(merged.env.A, '');
     assert.deepEqual(restoreSecretValues({ env: { A: '' } }, null), { env: { A: '' } });
+  });
+});
+
+describe('patch-store · 落盘形状必须是 `- insert:`（0.4.3 的核心修复）', () => {
+  /*
+   * 为什么这条形状这么要命：`cordis.patch.yml` 是**补丁列表**，不是条目列表。
+   * `applyEntryPatches()` 的实际逻辑是：
+   *
+   *   const { id, insert, name, ...overrides } = patch;
+   *   if (insert) { data.push(...insert); continue; }        // 建行
+   *   const target = entryMap.get(id);
+   *   if (!target) { warn('patch: entry %C not found'); continue; }  // 改行：找不到就吞掉
+   *
+   * profile 的补丁 apply 在**空根**上，所以顶层直接写 `- id: ...` 的那个 id
+   * 永远不存在 → 一条 logger warning → 插件根本没被挂载。症状就是：配置全对、
+   * 服务端 42 个工具、DSH 里 0 个，而且**一声不响**。
+   */
+
+  it('add 写出的是 `- insert:` 包装，不是顶层裸条目', async () => {
+    const { store, fs, path } = storeOn(`${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(configJson('shape'));
+    const text = fs.files.get(path);
+    assert.ok(text.includes('\n- insert:\n'), `必须用 insert 形状：\n${text}`);
+    assert.ok(text.includes('\n    - id: \'mcp-shape\'\n'), text);
+    assert.equal(/^- id:/m.test(text), false, '顶层裸条目 DSH 不会加载');
+  });
+
+  it('scan 认得两种形状，并把顶层裸的受管条目报成 legacy', () => {
+    const text = [
+      '# patch',
+      BEGIN_ANCHOR,
+      "- insert:",
+      "    - id: 'mcp-good'",
+      `      name: '${MCP_CLIENT_NAME}'`,
+      '      config:',
+      "        serverName: 'good'",
+      "- id: 'mcp-bad'",
+      `  name: '${MCP_CLIENT_NAME}'`,
+      '  config:',
+      "    serverName: 'bad'",
+      END_ANCHOR,
+      '',
+    ].join('\n');
+    const scanned = scan(text);
+    assert.deepEqual(scanned.items.map((item) => item.serverName).sort(), ['bad', 'good']);
+    assert.deepEqual(scanned.legacy, ['bad'], '只有扁平那条是待修复的');
+    assert.equal(scanned.items.every((item) => item.parsable === true), true);
+    assert.equal(scanned.items.every((item) => item.managed === true), true);
+  });
+
+  it('段外的手写条目不算 legacy（它可能真是在改某个已有条目）', () => {
+    const text = [
+      "# - id: 'mcp-hand'",
+      `- id: 'mcp-hand'`,
+      `  name: '${MCP_CLIENT_NAME}'`,
+      '  config:',
+      "    serverName: 'hand'",
+      '',
+    ].join('\n');
+    const scanned = scan(text);
+    assert.equal(scanned.items.length, 1);
+    assert.deepEqual(scanned.legacy, [], '不是本插件受管段里的，不该报');
+  });
+
+  it('repair 把 legacy 改成 insert 形状，且密钥原样保留', async () => {
+    const text = [
+      '# patch',
+      BEGIN_ANCHOR,
+      "- id: 'mcp-legacy'",
+      `  name: '${MCP_CLIENT_NAME}'`,
+      '  config:',
+      "    serverName: 'legacy'",
+      "    transport: 'streamable-http'",
+      "    url: 'https://example.test/mcp'",
+      '    headers:',
+      "      x-litellm-api-key: 'sk-secret'",
+      END_ANCHOR,
+      '',
+    ].join('\n');
+    const { store, fs, path } = storeOn(text);
+    const result = await store.repair();
+    assert.equal(result.repaired, 1);
+    const after = fs.files.get(path);
+    assert.ok(after.includes('\n- insert:\n'), after);
+    assert.ok(after.includes("x-litellm-api-key: 'sk-secret'"), '修复不能把密钥弄丢');
+    assert.equal(/^- id:/m.test(after), false, '旧形状必须消失');
+    // 修复后就是正常条目了：能读、能查到、不再是 legacy
+    const snapshot = await store.read();
+    assert.deepEqual(snapshot.legacy, []);
+    assert.equal(snapshot.items[0].serverName, 'legacy');
+    assert.deepEqual(snapshot.items[0].headerKeys, ['x-litellm-api-key']);
+  });
+
+  it('repair 幂等：没有可修的时候 repaired:0 且不落盘', async () => {
+    const { store, fs, path } = storeOn(`${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(configJson('done'));
+    const before = fs.files.get(path);
+    const result = await store.repair();
+    assert.equal(result.repaired, 0);
+    assert.equal(fs.files.get(path), before, '没有待修复条目时一个字节都不该动');
+  });
+
+  it('编辑一条 legacy 会顺手把它修成 insert 形状（改一次就好）', async () => {
+    const { store, fs, path } = storeOn(
+      `${BEGIN_ANCHOR}\n- id: 'mcp-flat'\n  name: '${MCP_CLIENT_NAME}'\n  config:\n    serverName: 'flat'\n    transport: 'stdio'\n    command: 'node'\n${END_ANCHOR}\n`,
+    );
+    await store.replace('flat', configJson('flat'));
+    const after = fs.files.get(path);
+    assert.ok(after.includes('\n- insert:\n'), `编辑后必须是可加载的形状：\n${after}`);
+    assert.deepEqual((await store.read()).legacy, []);
+  });
+
+  it('删掉 insert 包装里的唯一条目：整个包装一起消失，不留空壳', async () => {
+    const { store, fs, path } = storeOn(`${BEGIN_ANCHOR}\n${END_ANCHOR}\n`);
+    await store.add(configJson('solo'));
+    await store.remove('solo');
+    const after = fs.files.get(path);
+    assert.equal(after.includes('insert'), false, `空 \`- insert:\` 是坏 YAML：\n${after}`);
+  });
+
+  it('条目在用户手写的多条目 insert 里：只改内层，不碰别人的结构', () => {
+    const text = [
+      BEGIN_ANCHOR,
+      '- insert:',
+      "    - id: 'mcp-one'",
+      `      name: '${MCP_CLIENT_NAME}'`,
+      '      config:',
+      "        serverName: 'one'",
+      "    - id: 'mcp-two'",
+      `      name: '${MCP_CLIENT_NAME}'`,
+      '      config:',
+      "        serverName: 'two'",
+      END_ANCHOR,
+      '',
+    ].join('\n');
+    const next = replaceEntry(text, 'one', {
+      id: 'mcp-one',
+      name: MCP_CLIENT_NAME,
+      disabled: false,
+      config: { serverName: 'one', transport: 'stdio', command: 'node' },
+    });
+    const scanned = scan(next);
+    assert.deepEqual(scanned.items.map((item) => item.serverName).sort(), ['one', 'two']);
+    assert.equal((next.match(/^- insert:/gm) ?? []).length, 1, '包装不该被拆成两个');
   });
 });

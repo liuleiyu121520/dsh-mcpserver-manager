@@ -7,6 +7,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { createServer, listServers, messageFor, removeServer, toggleServer } from './api.js';
 import { CSS } from './styles.js';
+import { PLUGIN_VERSION } from '../version.js';
 import { AddDialog } from './AddDialog.jsx';
 import { ConfirmDialog } from './ConfirmDialog.jsx';
 import { EmptyState } from './EmptyState.jsx';
@@ -128,6 +129,10 @@ export function McpManager() {
   const fileDisplay = typeof snapshot?.fileDisplay === 'string' ? snapshot.fileDisplay : '';
   const taken = snapshot?.taken ?? { serverNames: [], ids: [] };
   const anchorsBroken = snapshot?.anchors === 'broken';
+  // 页面刷新就会换新的 bundle，Host 却只在进程启动时加载一次。两者版本不一致
+  // 意味着"升级了但没重启"，此时两边校验规则不同，用户会看到互相矛盾的提示。
+  const hostVersion = typeof snapshot?.version === 'string' ? snapshot.version : '';
+  const staleHost = phase === 'ready' && hostVersion !== PLUGIN_VERSION;
 
   return (
     <div className="dshmcp-page">
@@ -142,6 +147,19 @@ export function McpManager() {
         }}
         onRefresh={refresh}
       />
+
+      {staleHost ? (
+        <div className="dshmcp-banner" role="alert">
+          <WarningIcon />
+          <div className="dshmcp-banner-body">
+            <div>
+              页面 v{PLUGIN_VERSION}，
+              {hostVersion === '' ? '运行中的 Host 没有报告版本' : `运行中的 Host 是 v${hostVersion}`}
+            </div>
+            <div className="dshmcp-banner-note">Host 半还是重启前的旧代码，重启 DSH 后才会用上新的校验规则。</div>
+          </div>
+        </div>
+      ) : null}
 
       {banner === '' ? null : (
         <div className="dshmcp-banner" role="alert">
@@ -215,6 +233,7 @@ export function McpManager() {
         <AddDialog
           existingServerNames={Array.isArray(taken.serverNames) ? taken.serverNames : []}
           existingIds={Array.isArray(taken.ids) ? taken.ids : []}
+          staleHost={staleHost}
           onSubmit={onAdd}
           onCancel={() => setAdding(false)}
         />

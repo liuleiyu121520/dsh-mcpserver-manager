@@ -12,6 +12,7 @@ import { after, before, describe, it } from 'node:test';
 import { apply } from '../src/index.js';
 import { BEGIN_ANCHOR, END_ANCHOR, createPatchStore } from '../src/patch-store.js';
 import { PREFIX, SERVERS_PATH, registerRoutes, serverNameFromPath } from '../src/routes.js';
+import { PLUGIN_VERSION } from '../src/version.js';
 
 /** @type {string} */
 let dir;
@@ -137,6 +138,15 @@ describe('routes · 端点与信封', () => {
     assert.equal(payload.data.anchors, 'missing');
     assert.deepEqual(payload.data.items, []);
     assert.equal(typeof payload.revision, 'number');
+  });
+
+  it('GET /servers 报告运行中的 Host 版本（页面据此发现"升级了没重启"）', async () => {
+    const { payload } = await call('GET', SERVERS_PATH);
+    assert.equal(
+      payload.data.version,
+      PLUGIN_VERSION,
+      'Host 必须报告自己的版本，否则页面无法发现它是旧进程',
+    );
   });
 
   it('POST /servers —— 201 且文件里出现受管段与条目', async () => {

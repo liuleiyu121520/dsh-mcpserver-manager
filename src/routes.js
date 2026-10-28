@@ -14,6 +14,7 @@
  */
 import { codedError } from './patch-store.js';
 import { SERVER_NAME_RE, validateServerInput } from './validate.js';
+import { PLUGIN_VERSION } from './version.js';
 
 /** 路由前缀（与包名一致）。 */
 export const PREFIX = '/api/dsh-mcpserver-manager';
@@ -207,6 +208,9 @@ export function registerRoutes(ctx, store, logger = () => {}) {
     if (req.method === 'GET') {
       const snapshot = await store.read();
       sendOk(res, 200, {
+        // 运行中的 Host 版本：客户端拿它跟自己 bundle 里的常量比。不一致就说明
+        // "升级了但没重启宿主"——那时两边的校验规则不是一个版本，报错会自相矛盾。
+        version: PLUGIN_VERSION,
         file: snapshot.file,
         fileDisplay: snapshot.fileDisplay,
         dshHome: snapshot.dshHome,

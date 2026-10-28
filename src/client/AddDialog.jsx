@@ -64,11 +64,18 @@ const SAMPLES = Object.freeze([
  * @param {object} props 属性。
  * @param {string[]} [props.existingServerNames] 已占用的 serverName。
  * @param {string[]} [props.existingIds] 已占用的条目 id。
+ * @param {boolean} [props.staleHost] 运行中的 Host 是不是旧版本。
  * @param {(raw: string) => Promise<void>} props.onSubmit 提交；抛错时弹窗保持打开。
  * @param {() => void} props.onCancel 取消。
  * @returns {JSX.Element} 弹窗。
  */
-export function AddDialog({ existingServerNames = [], existingIds = [], onSubmit, onCancel }) {
+export function AddDialog({
+  existingServerNames = [],
+  existingIds = [],
+  staleHost = false,
+  onSubmit,
+  onCancel,
+}) {
   const [text, setText] = useState(SAMPLES[0].value);
   const [submitting, setSubmitting] = useState(false);
   const [remoteError, setRemoteError] = useState('');
@@ -158,7 +165,12 @@ export function AddDialog({ existingServerNames = [], existingIds = [], onSubmit
             <div className="dshmcp-issues">
               <div className="dshmcp-issue is-error">
                 <WarningIcon />
-                <span>{remoteError}</span>
+                <span>
+                  {/* 标明来源：本地校验与 Host 校验用的虽同一份规则，但 Host 可能
+                      是重启前的旧版本，两者说法不一致时必须能分清是谁在拦。 */}
+                  服务端未通过：{remoteError}
+                  {staleHost === true ? '（Host 是旧版本，重启 DSH 后重试）' : ''}
+                </span>
               </div>
             </div>
           )}

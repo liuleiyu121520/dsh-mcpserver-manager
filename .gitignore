@@ -1,4 +1,5 @@
 node_modules/
+.workbuddy/
 # lib/ 必须入库：DSH 通过 github:owner/repo 安装插件时不执行构建，
 # 仓库里没有产物就装不起来（dsh-wallpaper 作为已上架 DSH Hub 的插件正是这么做的）。
 .DS_Store

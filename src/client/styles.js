@@ -268,9 +268,11 @@ export const CSS = `
   border-left-color: var(--dsw-alias-state-warning-primary, #b45309);
 }
 
-/* 操作结果提示：底部居中，短、可读、自己消失，不需要用户关。 */
+/* 操作结果提示：**页面上方**居中，短、可读、自己消失，不需要用户关。
+   放顶部而不是底部：操作入口（刷新、添加、卡片上的体检/开关）都在上半屏，
+   结论贴着动作出现才叫"就地反馈"；贴着屏幕底边时，视线要走一整屏才看得到。 */
 .dshmcp-toast {
-  position: fixed; left: 50%; bottom: 24px; z-index: 60;
+  position: fixed; left: 50%; top: 16px; z-index: 60;
   /* 纯提示，不该抢走底下按钮的点击——一个盖住页面的 toast 就是新的
      "点了没反应"。 */
   pointer-events: none;
@@ -283,7 +285,7 @@ export const CSS = `
   animation: dshmcp-toast-in 160ms ease-out;
 }
 @keyframes dshmcp-toast-in {
-  from { opacity: 0; transform: translate(-50%, 8px); }
+  from { opacity: 0; transform: translate(-50%, -8px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 `;

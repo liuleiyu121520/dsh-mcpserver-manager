@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcpserver-manager",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "description": "在 DeepSeek Harness 设置里管理 MCP 服务器：粘贴一段 JSON → 双重校验 → 写入官方 cordis.patch.yml 的受管段，原子落盘、备份可回滚",
   "keywords": [

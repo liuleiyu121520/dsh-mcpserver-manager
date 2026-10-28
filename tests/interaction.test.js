@@ -63,6 +63,14 @@ describe('交互 · 提示不许挡住操作', () => {
     assert.ok(block.includes('pointer-events: none'), 'toast 是纯提示，不该抢走底下按钮的点击');
   });
 
+  it('toast 在**页面上方**，不是贴着屏幕底边', () => {
+    const block = ruleOf('.dshmcp-toast');
+    // 操作入口都在上半屏（刷新 / 添加 / 卡片上的体检与开关），结论要贴着动作出现。
+    assert.match(block, /\btop:\s*\d+px/, 'toast 应贴在页面上方');
+    assert.equal(/\bbottom:\s*[\d]/.test(block), false, '不许再贴底边');
+    assert.match(CSS, /@keyframes dshmcp-toast-in\s*\{[^}]*from\s*\{[^}]*translate\(-50%,\s*-/, '进场方向要跟着改：从上往下落');
+  });
+
   it('按钮按下有触感反馈（图标按钮没有这一下就像坏的）', () => {
     assert.match(CSS, /\.dshmcp-btn:active:not\(:disabled\)\s*\{[^}]*transform:\s*scale/, '缺 :active 反馈');
   });

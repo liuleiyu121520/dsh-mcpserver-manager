@@ -116,7 +116,7 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 ## 写入位置与安全
 
 - **写入文件**：**当前宿主 profile** 的 patch 层。插件从宿主拿 `profileContext.patchPath`（cordis `Context` 上的权威字段，由 dsh 在启动 profile 时提供），所以 desktop 宿主写 `~/.dsh/profiles/desktop/cordis.patch.yml`、web 宿主写 `~/.dsh/profiles/web/cordis.patch.yml`——**加完就用得上，不会再出现「加了但工具没出现」**。
-- **页面顶部会显示当前实际写入路径**：设置页标题下方的「写入位置」条直接给出 `~/.dsh/profiles/<profile>/cordis.patch.yml`、当前 profile 名，以及这条路径的来源（宿主 `profileContext` / 显式配置 / `$DSH_HOME` / 默认值）。Host 日志同样会打出这一行：`mounted profile=desktop file=~/.dsh/profiles/desktop/cordis.patch.yml source=profileContext`。
+- **页面顶部会显示当前实际写入路径**：设置页标题下方的「写入位置」条直接给出 `~/.dsh/profiles/<profile>/cordis.patch.yml`、当前 profile 名，以及这条路径的来源（宿主 `profileContext` / 显式配置 / `$DSH_HOME` / 默认值）。用 `patchFile` 显式指定路径时**不显示 profile 名**——那条路径不一定是 `profiles/<name>/` 形状，与其显示一个和宿主对不上的标签，不如只给路径。Host 日志同一标准：正常为 `mounted profile=desktop file=~/.dsh/profiles/desktop/cordis.patch.yml source=profileContext`；显式指定 `patchFile` 时 profile 一栏写 `(未指定，由 patchFile 决定)`，另有一条 `使用配置中显式指定的 patchFile：<path>`。**日志里不会出现与本机 profile 不符的 profile 名**（排障时要贴的就是这一行）。
 - **路径解析优先级**（第一个命中的胜出）：
 
   | 顺序 | 来源 | 说明 |

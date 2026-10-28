@@ -18,7 +18,7 @@ import { PlusIcon, RefreshIcon } from './Icons.jsx';
  * @type {Readonly<Record<string, string>>}
  */
 const SOURCE_NOTE = Object.freeze({
-  'config.patchFile': '由插件配置 config.patchFile 指定',
+  'config.patchFile': '由配置 patchFile 显式指定',
   profileContext: '由当前宿主 profile 决定',
   'config.dshHome': '由插件配置 dshHome 指定',
   '$DSH_HOME': '由环境变量 $DSH_HOME 决定',
@@ -37,6 +37,10 @@ const SOURCE_NOTE = Object.freeze({
  */
 export function Toolbar({ fileDisplay = '', profile = '', source = '', busy = false, onAdd, onRefresh }) {
   const note = typeof SOURCE_NOTE[source] === 'string' ? SOURCE_NOTE[source] : '';
+  // `patchFile` 显式指定的路径不一定是 `profiles/<name>/` 形状，那种情况下
+  // `profile` 只是兜底标签（默认 `web`）。宁可不显示，也不给一个与宿主不符的
+  // profile 名——路径才是权威，来源说明已经讲清它是被显式指定的。
+  const showProfile = profile !== '' && source !== 'config.patchFile';
   return (
     <>
       <div className="dshmcp-head">
@@ -60,7 +64,7 @@ export function Toolbar({ fileDisplay = '', profile = '', source = '', busy = fa
       <div className="dshmcp-target">
         <span className="dshmcp-target-label">写入位置</span>
         <code className="dshmcp-target-path">{fileDisplay === '' ? '正在解析…' : fileDisplay}</code>
-        {profile === '' ? null : <span className="dshmcp-chip">profile: {profile}</span>}
+        {showProfile ? <span className="dshmcp-chip">profile: {profile}</span> : null}
         {note === '' ? null : <span className="dshmcp-target-note">{note}</span>}
       </div>
     </>

@@ -5,7 +5,7 @@
  * `effect`）把路由挂起来，再用假 req/res 直接打——不依赖真实宿主进程。
  */
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -506,9 +506,10 @@ describe('routes · 回落时必须留痕（可诊断性）', () => {
       assert.ok(line.includes('config.dshHome'), `应写清回落来源：${line}`);
       assert.ok(line.includes('cordis.patch.yml'), `应写清回落路径：${line}`);
       assert.ok(line.includes('profile=web'), `应写清实际 profile：${line}`);
-      // warn 归 warn，info 归 info：不要在两处重复同一条。
+      // warn 归 warn，info 归 info：不要在两处重复同一条，info 只放 mounted。
       assert.equal(infos.some((item) => item.includes('[WARN]')), false, infos.join(' | '));
-      assert.ok(infos.some((item) => item.includes('mounted')), infos.join(' | '));
+      assert.equal(infos.filter((item) => item.includes('mounted')).length, 1, infos.join(' | '));
+      assert.equal(infos.length, 1, `infos 应只有 mounted 一条：${infos.join(' | ')}`);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -537,18 +538,215 @@ describe('routes · 回落时必须留痕（可诊断性）', () => {
     try {
       /** @type {string[]} */
       const warns = [];
+      /** @type {string[]} */
+      const infos = [];
       /** @type {Array<{kind: string, path: string, handler: Function}>} */
       const table = [];
       apply(
         ctxWith(
           table,
           (name) => (name === 'profileContext' ? { name: 'desktop', patchPath: desktop, home: root } : undefined),
-          { info: () => {}, warn: (line) => warns.push(line) },
+          { info: (line) => infos.push(line), warn: (line) => warns.push(line) },
         ),
         {},
       );
-      assert.deepEqual(warns, []);
+      assert.deepEqual(warns, [], warns.join(' | '));
+      // 宿主权威路径既不是回落、也不是「显式指定」：info 只应有 mounted 一条。
+      assert.equal(infos.length, 1, infos.join(' | '));
+      assert.ok(infos[0].includes('mounted'), infos[0]);
+      assert.ok(infos[0].includes('source=profileContext'), infos[0]);
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('显式 config.patchFile 不是「回落」：宿主没提供 profileContext 时也不打警告', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-pf-'));
+    const explicit = join(root, 'explicit', 'cordis.patch.yml');
+    try {
+      /** @type {string[]} */
+      const warns = [];
+      /** @type {string[]} */
+      const infos = [];
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      apply(
+        ctxWith(table, () => undefined, {
+          info: (line) => infos.push(line),
+          warn: (line) => warns.push(line),
+        }),
+        { dshHome: root, patchFile: explicit },
+      );
+      // patchFile 是用户显式指定到文件的最高优先级，说它"回落"既是误报也永远消不掉。
+      assert.deepEqual(warns, [], warns.join(' | '));
+      const mounted = infos.find((line) => line.includes('mounted'));
+      assert.ok(mounted !== undefined, infos.join(' | '));
+      assert.ok(mounted.includes('source=config.patchFile'), mounted);
+      assert.ok(mounted.includes('cordis.patch.yml'), mounted);
+      // 但显式指定值得一条 info（不带 [WARN]、不带「宿主未提供」前提）。
+      const explicitInfos = infos.filter((line) => line.includes('使用配置中显式指定的 patchFile'));
+      assert.equal(explicitInfos.length, 1, infos.join(' | '));
+      assert.ok(explicitInfos[0].includes('cordis.patch.yml'), explicitInfos[0]);
+      assert.equal(explicitInfos[0].includes('[WARN]'), false, explicitInfos[0]);
+      assert.equal(explicitInfos[0].includes('宿主未提供'), false, explicitInfos[0]);
+      assert.equal(infos.length, 2, `info 只该有 mounted + 显式指定两条：${infos.join(' | ')}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('宿主提供了 profileContext + 用户配了 patchFile：仍然不打警告（不能断言宿主没提供）', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-pf2-'));
+    const desktop = join(root, 'profiles', 'desktop', 'cordis.patch.yml');
+    const explicit = join(root, 'explicit', 'cordis.patch.yml');
+    mkdirSync(join(root, 'profiles', 'desktop'), { recursive: true });
+    try {
+      /** @type {string[]} */
+      const warns = [];
+      /** @type {string[]} */
+      const infos = [];
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      apply(
+        ctxWith(
+          table,
+          (name) => (name === 'profileContext' ? { name: 'desktop', patchPath: desktop, home: root } : undefined),
+          { info: (line) => infos.push(line), warn: (line) => warns.push(line) },
+        ),
+        { patchFile: explicit },
+      );
+      assert.deepEqual(warns, [], `宿主明明提供了 profileContext，不许打出相反的话：${warns.join(' | ')}`);
+      const mounted = infos.find((line) => line.includes('mounted'));
+      assert.ok(mounted.includes('source=config.patchFile'), mounted);
+      // 写盘仍走 patchFile（结构性压过宿主上下文），不是 desktop 文件。
+      assert.ok(mounted.includes(explicit), `写入位置应是 patchFile：${mounted}`);
+      assert.equal(infos.some((line) => line.includes('宿主未提供')), false, infos.join(' | '));
+
+      // 回归：写盘真的落在 patchFile，而不是宿主的 desktop 文件。
+      const read = await dispatch(table, 'GET', SERVERS_PATH);
+      assert.equal(read.payload.data.file, explicit);
+      assert.equal(read.payload.data.source, 'config.patchFile');
+      const created = await dispatch(table, 'POST', SERVERS_PATH, JSON.stringify({ raw: rawFor('pf') }));
+      assert.equal(created.statusCode, 201);
+      assert.ok(readFileSync(explicit, 'utf8').includes("serverName: 'pf'"), '必须写进 patchFile');
+      assert.equal(existsSync(desktop), false, '绝不能顺手在 desktop 目录里建文件');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('mounted 行不输出错的 profile 标签：patchFile 场景写「由 patchFile 决定」，其余照旧', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-mlog-'));
+    const explicit = join(root, 'explicit', 'cordis.patch.yml'); // 刻意不是 profiles/<name>/ 形状
+    const desktop = join(root, 'profiles', 'desktop', 'cordis.patch.yml');
+    mkdirSync(join(root, 'profiles', 'desktop'), { recursive: true });
+    /** @type {string[]} */
+    const infos = [];
+    /** @type {Array<{kind: string, path: string, handler: Function}>} */
+    const table = [];
+    /**
+     * 取 mounted 行。
+     *
+     * 必须匹配 `mounted profile=` 这个**完整前缀**：临时目录名、文件路径都可能
+     * 含有 "mounted" 字样，只用 `includes('mounted')` 会先命中「显式指定」那条
+     * info（它的文案里带着路径），从而测错对象。
+     * @returns {string} 日志行。
+     */
+    const mountedLine = () => {
+      const line = infos.find((item) => item.includes('mounted profile='));
+      assert.ok(line !== undefined, `缺 mounted 行：${infos.join(' | ')}`);
+      return line;
+    };
+    try {
+      // ① patchFile（非 profiles/<name>/ 形状）：不许出现兜底的 profile=web。
+      apply(
+        ctxWith(table, () => undefined, {
+          info: (line) => infos.push(line),
+          warn: (line) => infos.push(`[WARN] ${line}`),
+        }),
+        { patchFile: explicit },
+      );
+      const explicitLine = mountedLine();
+      assert.ok(explicitLine.includes('profile=(未指定，由 patchFile 决定)'), explicitLine);
+      assert.equal(explicitLine.includes('profile=web'), false, `不许显示错的 profile 标签：${explicitLine}`);
+      assert.ok(explicitLine.includes(explicit), explicitLine);
+      assert.ok(explicitLine.includes('source=config.patchFile'), explicitLine);
+
+      // ② profileContext：仍是真实 profile 名。
+      infos.length = 0;
+      apply(
+        ctxWith(
+          table,
+          (name) => (name === 'profileContext' ? { name: 'desktop', patchPath: desktop, home: root } : undefined),
+          { info: (line) => infos.push(line), warn: () => {} },
+        ),
+        {},
+      );
+      const contextLine = mountedLine();
+      assert.ok(contextLine.includes('profile=desktop'), contextLine);
+      assert.equal(contextLine.includes('由 patchFile 决定'), false, contextLine);
+
+      // ③ 回落层：仍是实际生效的 profile 名（这里走 config.dshHome）。
+      infos.length = 0;
+      apply(
+        ctxWith(table, () => undefined, { info: (line) => infos.push(line), warn: () => {} }),
+        { dshHome: root },
+      );
+      assert.ok(mountedLine().includes('profile=web'), mountedLine());
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('三种回落来源各打一条 warn（$DSH_HOME / ~/.dsh 也覆盖到）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-src-'));
+    const savedDshHome = process.env.DSH_HOME;
+    /**
+     * 跑一次 apply，返回两个通道拿到的行。
+     * @param {object} config 插件配置。
+     * @returns {{infos: string[], warns: string[]}} 日志。
+     */
+    const runApply = (config) => {
+      /** @type {string[]} */
+      const infos = [];
+      /** @type {string[]} */
+      const warns = [];
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      apply(ctxWith(table, () => undefined, {
+        info: (line) => infos.push(line),
+        warn: (line) => warns.push(line),
+      }), config);
+      return { infos, warns };
+    };
+    try {
+      // ① config.dshHome
+      const byConfig = runApply({ dshHome: root });
+      assert.equal(byConfig.warns.length, 1, byConfig.warns.join(' | '));
+      assert.ok(byConfig.warns[0].includes('config.dshHome'), byConfig.warns[0]);
+
+      // ② $DSH_HOME（env 是 process.env，只能临时改并复原）
+      process.env.DSH_HOME = root;
+      const byEnv = runApply({});
+      process.env.DSH_HOME = savedDshHome;
+      assert.equal(byEnv.warns.length, 1, byEnv.warns.join(' | '));
+      assert.ok(byEnv.warns[0].includes('$DSH_HOME'), byEnv.warns[0]);
+
+      // ③ ~/.dsh 兜底
+      delete process.env.DSH_HOME;
+      const byDefault = runApply({});
+      if (savedDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = savedDshHome;
+      assert.equal(byDefault.warns.length, 1, byDefault.warns.join(' | '));
+      assert.ok(byDefault.warns[0].includes('~/.dsh'), byDefault.warns[0]);
+
+      // 三次都只该有一条 warn，且 info 里不该混入 WARN。
+      for (const { infos } of [byConfig, byEnv, byDefault]) {
+        assert.equal(infos.filter((line) => line.includes('[WARN]')).length, 0, infos.join(' | '));
+      }
+    } finally {
+      if (savedDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = savedDshHome;
       rmSync(root, { recursive: true, force: true });
     }
   });

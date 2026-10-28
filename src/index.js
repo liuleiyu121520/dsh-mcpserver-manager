@@ -14,9 +14,33 @@
  */
 import { normalizeConfig } from './config.js';
 import { createPatchStore } from './patch-store.js';
+import { PATH_SOURCES } from './paths.js';
 import { registerRoutes } from './routes.js';
 
 export const inject = ['webServer', 'connection'];
+
+/**
+ * 真正属于「回落」的路径来源。
+ *
+ * 只有这三层是"宿主没给 profileContext，我们只能猜"：
+ * `config.dshHome` / `$DSH_HOME` / `~/.dsh`。
+ *
+ * `profileContext` 与 `config.patchFile` **都不在里面**，原因不同：
+ * - `profileContext` 是宿主权威，本来就不是回落；
+ * - `config.patchFile` 是用户**显式指定到文件**的最高优先级，它结构性地压过
+ *   profileContext——「宿主未提供 profileContext」这个前提对它永远不成立。
+ *   把它算进来会打出事实上错误的日志（例如宿主明明提供了 profileContext、
+ *   用户又配了 patchFile 时，日志会断言宿主没提供），而这条日志的唯一用途
+ *   就是排障：说错话比不说更坏。
+ *
+ * @type {ReadonlySet<string>}
+ */
+const FALLBACK_SOURCES = new Set([
+  PATH_SOURCES.CONFIG_DSH_HOME,
+  PATH_SOURCES.ENV_DSH_HOME,
+  PATH_SOURCES.DEFAULT_DSH_HOME,
+]);
+
 
 /**
  * 造一个"只打 serverName / 错误码 / 路径"的日志函数。
@@ -104,15 +128,30 @@ export function apply(ctx, config = {}) {
   // 回落是一次**要在日志里留痕**的降级：某个满足 engines 但没 provide
   // profileContext 的宿主会让这里静默落回 `~/.dsh/profiles/web`，那等于原 BUG
   // 复现。只改可观测性，不改任何解析行为。
-  if (store.source !== 'profileContext') {
+  // 判定必须收窄到 FALLBACK_SOURCES：`config.patchFile` 是用户显式指定，
+  // 对它说「宿主未提供 profileContext，已回落」既是误报、也会永消不掉。
+  if (FALLBACK_SOURCES.has(store.source)) {
     logger.warn(
       `宿主未提供 profileContext，已回落到 ${store.source}：${store.fileDisplay}` +
         `（profile=${store.profile}）。若这不是你期望的 profile，请检查宿主版本或显式配置 patchFile。`,
     );
+  } else if (store.source === PATH_SOURCES.CONFIG_FILE) {
+    // 显式指定不是降级，但它值得一条 info：用户改了 patchFile 之后要在日志里
+    // 看到它真的生效了。**不带** `[WARN]`、**不带**「宿主未提供」这类前提，
+    // 也不提 profile——patchFile 不一定是 `profiles/<name>/` 形状，此时 profile
+    // 只是个兜底标签，写进日志会误导。
+    logger(`使用配置中显式指定的 patchFile：${store.fileDisplay}`);
   }
   // 日志必须打得足够具体：用户核对「到底写进了哪个 profile 的哪个文件」全靠这一行。
+  // 但 `profile` 这一栏在 patchFile 场景下是**兜底标签**（路径不是 `profiles/<name>/`
+  // 形状时退回 `config.profile`，默认 web），写出来就是错的——而这一行正是排障时
+  // 要用户贴出来的。宁可不显示，也不能显示错的：保留 `profile=` 这个 key 便于 grep，
+  // 值换成「未指定，由 patchFile 决定」。
+  const profileLabel = store.source === PATH_SOURCES.CONFIG_FILE
+    ? '(未指定，由 patchFile 决定)'
+    : store.profile;
   logger(
-    `mounted profile=${store.profile} file=${store.fileDisplay} source=${store.source}`,
+    `mounted profile=${profileLabel} file=${store.fileDisplay} source=${store.source}`,
   );
   return () => {};
 }

@@ -808,6 +808,12 @@ describe('patch-store · Claude 格式落盘（{ mcpServers: { … } }）', () =
     assert.ok(text.includes("x-litellm-api-key: 'Bearer sk-test'"), text);
     assert.equal(text.includes('disabled'), false, 'disabled:false 不该写进文件（默认就是启用）');
     assert.equal(text.includes('transportType'), false, '外来字段不该落盘');
+
+    // 明文 token 留在文件里（MCP 自己要读），但**绝不进 read() 快照**
+    // ——那份快照会经 HTTP 下发给浏览器。
+    const snapshot = await store.read();
+    assert.equal(JSON.stringify(snapshot).includes('sk-test'), false, 'headers 里的 token 不该进快照');
+    assert.ok(snapshot.items[0].raw.includes('x-litellm-api-key'), '头名要保留，用户才知道配了什么');
   });
 
   it('disabled:true 提到条目级（不是 config 里的字段），并能在重启后读回', async () => {

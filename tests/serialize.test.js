@@ -208,6 +208,58 @@ describe('serialize · env 脱敏', () => {
   });
 });
 
+describe('serialize · headers 脱敏（远程 MCP 的 token 就在这里）', () => {
+  it('块风格：鉴权头的值换成占位符，头名保留', () => {
+    const text = [
+      '- id: mcp-r',
+      '  config:',
+      "    url: 'https://x.test/mcp'",
+      '    headers:',
+      "      Authorization: 'Bearer sk-secret'",
+      "      x-api-key: 'sk-2'",
+    ].join('\n');
+    const result = redactEnvValues(text);
+    assert.equal(result.includes('sk-secret'), false, result);
+    assert.equal(result.includes('sk-2'), false, result);
+    assert.ok(result.includes('Authorization'));
+    assert.ok(result.includes('x-api-key'));
+    assert.ok(result.includes("url: 'https://x.test/mcp'"), 'url 不是秘密，必须照旧可见');
+  });
+
+  it('流风格 headers 也打码', () => {
+    const result = redactEnvValues("    headers: { Authorization: 'Bearer sk-secret' }");
+    assert.equal(result.includes('sk-secret'), false, result);
+    assert.ok(result.includes('Authorization'));
+  });
+
+  it('引号键 / 行尾注释 两种形态都不能漏', () => {
+    for (const key of ["'headers'", '"headers"', 'headers']) {
+      const text = `    ${key}:  # 备注\n      Authorization: 'Bearer sk-secret'`;
+      assert.equal(redactEnvValues(text).includes('sk-secret'), false, `${key} 漏了明文`);
+    }
+  });
+
+  it('headers 的 !!js 表达式原样保留', () => {
+    const result = redactEnvValues('    headers:\n      Authorization: !!js `Bearer ${process.env.T}`');
+    assert.ok(result.includes('!!js `Bearer ${process.env.T}`'), result);
+  });
+
+  it('env 与 headers 同时存在时两处都打码，且互不干扰', () => {
+    const text = [
+      '  config:',
+      '    env:',
+      "      A: 'env-secret'",
+      '    headers:',
+      "      B: 'header-secret'",
+    ].join('\n');
+    const result = redactEnvValues(text);
+    assert.equal(result.includes('env-secret'), false);
+    assert.equal(result.includes('header-secret'), false);
+    assert.ok(result.includes('A'));
+    assert.ok(result.includes('B'));
+  });
+});
+
 /**
  * BUG-1 回归矩阵：env 脱敏**形态覆盖**。
  *

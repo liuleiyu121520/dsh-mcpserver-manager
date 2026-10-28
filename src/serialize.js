@@ -263,34 +263,53 @@ function redactFlowPairs(inner) {
 }
 
 /**
- * env 键的识别正则。
+ * **取值即秘密**的键：`env`（本地进程的环境变量）与 `headers`（远程服务的
+ * 鉴权头）。
  *
- * 键可能被写成 `env` / `'env'` / `"env"`（不少格式化工具会给键加引号）——三种
- * 都得认，否则整个 env 块会被跳过，那等于把明文 token 直接下发给浏览器。
- * 注意 `environment:` 之类不能误命中：`env` 之后必须紧跟可选的空白与冒号。
+ * 后者是补上来的：远程 MCP 的 token 按惯例就放在 `Authorization` /
+ * `x-api-key` 这类请求头里，只脱敏 `env` 等于把一半的密钥原样下发到浏览器。
  */
-const ENV_KEY_RE = /^(\s*)(?:'env'|"env"|env)\s*:\s*([\s\S]*)$/;
+export const SECRET_KEYS = Object.freeze(['env', 'headers']);
 
 /**
- * 兜底守门：把 env 子树里**所有**还没脱敏的值打码。
+ * 造一个「认这个键」的识别正则。
+ *
+ * 键可能被写成 `env` / `'env'` / `"env"`（不少格式化工具会给键加引号）——三种
+ * 都得认，否则整个块会被跳过，那等于把明文 token 直接下发给浏览器。
+ * 注意 `environment:` 之类的键不能误命中：键名之后必须紧跟可选的空白与冒号。
+ *
+ * @param {string} key 键名。
+ * @returns {RegExp} 识别正则。
+ */
+function secretKeyRe(key) {
+  return new RegExp(`^(\\s*)(?:'${key}'|"${key}"|${key})\\s*:\\s*([\\s\\S]*)$`);
+}
+
+/** 键名 → 识别正则（一次性建好，读列表时每条都要跑）。 */
+const SECRET_KEY_RES = Object.freeze(
+  Object.fromEntries(SECRET_KEYS.map((key) => [key, secretKeyRe(key)])),
+);
+
+/**
+ * 兜底守门：把 `env` / `headers` 子树里**所有**还没脱敏的值打码。
  *
  * 主流程已经覆盖了块风格与流风格，但 YAML 形态太多了（引号键、行尾注释、深层
  * 嵌套、块标量…），任何一处漏判就等于把明文 token 下发到浏览器。所以这里再
- * 无条件扫一遍整个 env 子树：凡是有值的行一律打码，`!!js ` 表达式除外（它是
+ * 无条件扫一遍整个子树：凡是有值的行一律打码，`!!js ` 表达式除外（它是
  * 引用不是明文）。**宁可多打码，不可漏明文。**
  *
  * @param {string[]} out 输出行数组（原地修改）。
- * @param {number} index env 键所在行的下标。
- * @param {number} envIndent env 键的缩进宽度。
+ * @param {number} index 键所在行的下标。
+ * @param {number} keyIndent 键的缩进宽度。
  * @returns {void}
  */
-function redactEnvBlock(out, index, envIndent) {
+function redactSecretBlock(out, index, keyIndent) {
   for (let j = index + 1; j < out.length; j += 1) {
     const line = out[j];
     if (line.trim() === '') continue;
     const lineIndent = line.length - line.trimStart().length;
-    // 缩进回到 env 键这一层（或更浅）：子树结束。
-    if (lineIndent <= envIndent) break;
+    // 缩进回到键这一层（或更浅）：子树结束。
+    if (lineIndent <= keyIndent) break;
     // 纯注释不是值，不动它。
     if (line.trimStart().startsWith('#')) continue;
     const pair = splitPair(line.trimStart());
@@ -308,37 +327,49 @@ function redactEnvBlock(out, index, envIndent) {
 }
 
 /**
- * env 脱敏：把条目原文里 env 的值一律换成占位符，**保留 key**。
+ * 秘密脱敏：把条目原文里 `env` / `headers` 的值一律换成占位符，**保留 key**。
  *
  * `!!js ` 表达式原样保留——它是「去宿主环境变量里取」，本身就是引用而非明文，
  * 且用户需要看到自己配的是表达式。
  *
+ * 为什么连 `headers` 一起脱敏：远程 MCP 的 token 惯例放在 `Authorization` /
+ * `x-api-key` 这类请求头里（Claude / Cursor 的配置全是这个形状），只打码
+ * `env` 等于把另一半密钥原样通过 HTTP 下发给浏览器。
+ *
  * @param {string} text 条目原始 YAML 文本。
  * @returns {string} 脱敏后的文本（换行符与原文本一致）。
  */
-export function redactEnvValues(text) {
+export function redactSecretValues(text) {
   const newline = detectNewline(text);
   const lines = text.split(/\r?\n/);
   const out = lines.slice();
   for (let i = 0; i < lines.length; i += 1) {
-    const match = ENV_KEY_RE.exec(lines[i]);
-    if (match === null) continue;
-    const indent = match[1];
-    const rest = match[2].trim();
-    // 空值，或值的位置只有一个行尾注释（`env: # 备注`）：都是块风格，子行在后面。
-    // 早先把"带行尾注释"当成"有内联值"处理，于是子行一行都没被脱敏。
-    if (rest === '' || rest.startsWith('#')) {
-      redactEnvBlock(out, i, indent.length);
-      continue;
+    for (const key of SECRET_KEYS) {
+      const match = SECRET_KEY_RES[key].exec(lines[i]);
+      if (match === null) continue;
+      const indent = match[1];
+      const rest = match[2].trim();
+      // 空值，或值的位置只有一个行尾注释（`env: # 备注`）：都是块风格，子行在后面。
+      // 早先把"带行尾注释"当成"有内联值"处理，于是子行一行都没被脱敏。
+      if (rest === '' || rest.startsWith('#')) {
+        redactSecretBlock(out, i, indent.length);
+        continue;
+      }
+      if (rest.startsWith('{')) {
+        out[i] = `${indent}${key}: ${redactFlowPairs(rest.replace(/^\{/, '').replace(/\}\s*$/, ''))}`;
+        redactSecretBlock(out, i, indent.length);
+        continue;
+      }
+      // 无法枚举 key 的形态（整值表达式、块标量…）：整值脱敏，绝不留原文。
+      out[i] = `${indent}${key}: ${REDACTED_LITERAL}`;
+      redactSecretBlock(out, i, indent.length);
     }
-    if (rest.startsWith('{')) {
-      out[i] = `${indent}env: ${redactFlowPairs(rest.replace(/^\{/, '').replace(/\}\s*$/, ''))}`;
-      redactEnvBlock(out, i, indent.length);
-      continue;
-    }
-    // 无法枚举 key 的形态（整值表达式、块标量…）：整值脱敏，绝不留原文。
-    out[i] = `${indent}env: ${REDACTED_LITERAL}`;
-    redactEnvBlock(out, i, indent.length);
   }
   return out.join(newline);
 }
+
+/**
+ * 历史名字，等同于 `redactSecretValues`（脱敏范围已从 `env` 扩到 `env` +
+ * `headers`）。保留导出是为了不动既有调用点与单测。
+ */
+export const redactEnvValues = redactSecretValues;

@@ -127,22 +127,27 @@ function hasButton(tree, label) {
 }
 
 describe('client Toolbar · 头部真渲染', { skip: !hasEsbuild }, () => {
-  it('列表为空：不渲染刷新按钮（空列表刷新毫无反馈，只会让人以为漏加载了）', async () => {
+  it('列表为空：刷新与「添加 MCP」都不渲染（空态卡片里那个才是唯一入口）', async () => {
     const Toolbar = await loadToolbar();
-    const tree = render(Toolbar, { showRefresh: false });
+    const tree = render(Toolbar, { showActions: false });
     assert.equal(hasButton(tree, '刷新列表'), false, '空列表不该有刷新按钮');
-    assert.ok(tree.texts.includes('添加 MCP'), `「添加 MCP」必须一直在：${tree.texts.join(' | ')}`);
+    assert.equal(
+      tree.texts.includes('添加 MCP'),
+      false,
+      `空列表右上角不该再有「添加 MCP」：${tree.texts.join(' | ')}`,
+    );
   });
 
-  it('列表非空：渲染刷新按钮', async () => {
+  it('列表非空：刷新与「添加 MCP」都在', async () => {
     const Toolbar = await loadToolbar();
-    const tree = render(Toolbar, { showRefresh: true });
+    const tree = render(Toolbar, { showActions: true });
     assert.equal(hasButton(tree, '刷新列表'), true, '列表非空时刷新按钮必须在');
+    assert.ok(tree.texts.includes('添加 MCP'), `列表非空时「添加 MCP」必须在：${tree.texts.join(' | ')}`);
   });
 
   it('刷新进行中时刷新按钮 disabled，添加按钮不受影响', async () => {
     const Toolbar = await loadToolbar();
-    const tree = render(Toolbar, { showRefresh: true, busy: true });
+    const tree = render(Toolbar, { showActions: true, busy: true, refreshing: true });
     const refresh = tree.elements.find(
       (element) => element.type === 'button' && element.props?.['aria-label'] === '刷新列表',
     );
@@ -153,10 +158,40 @@ describe('client Toolbar · 头部真渲染', { skip: !hasEsbuild }, () => {
     assert.equal(add.props.disabled, undefined, 'busy 不该拦住「添加 MCP」');
   });
 
+  it('刷新时图标带旋转动画类（点了有反应，不是"什么都没发生"）', async () => {
+    const Toolbar = await loadToolbar();
+    const idle = render(Toolbar, { showActions: true });
+    const spinning = render(Toolbar, { showActions: true, refreshing: true });
+    const pick = (tree) =>
+      tree.elements.find((element) => element.type === 'button' && element.props?.['aria-label'] === '刷新列表');
+    assert.equal(pick(idle).props.className.includes('dshmcp-spin'), false, '空闲时不该转');
+    assert.equal(pick(spinning).props.className.includes('dshmcp-spin'), true, '刷新时图标必须转');
+    assert.equal(pick(spinning).props['aria-busy'], true);
+  });
+
+  it('版本号是个按钮（点它手动检查更新），检查中显示文案', async () => {
+    const Toolbar = await loadToolbar();
+    const tree = render(Toolbar, { showActions: true, version: '0.4.0', checking: true });
+    const version = tree.elements.find((element) => element.props?.className === 'dshmcp-version');
+    assert.ok(version !== undefined, `应该有版本按钮：${tree.texts.join(' | ')}`);
+    assert.equal(version.type, 'button');
+    assert.equal(version.props.disabled, true);
+    assert.ok(tree.texts.includes('检查中…'), tree.texts.join(' | '));
+  });
+
+  it('不传 version 时不渲染版本按钮（不显示一个空按钮）', async () => {
+    const Toolbar = await loadToolbar();
+    const tree = render(Toolbar, { showActions: true });
+    assert.equal(
+      tree.elements.some((element) => element.props?.className === 'dshmcp-version'),
+      false,
+    );
+  });
+
   it('不再渲染写入位置条（路径/ profile / 来源说明一并不渲染）', async () => {
     const Toolbar = await loadToolbar();
     const tree = render(Toolbar, {
-      showRefresh: true,
+      showActions: true,
       // 旧版这些 props 会画出「写入位置 ~/.dsh/...」条；新版即使传进来也不该理。
       fileDisplay: '~/.dsh/profiles/desktop/cordis.patch.yml',
       profile: 'desktop',
@@ -175,7 +210,7 @@ describe('client Toolbar · 头部真渲染', { skip: !hasEsbuild }, () => {
 
   it('副标题只有一句短文案（页面上不再堆解释）', async () => {
     const Toolbar = await loadToolbar();
-    const tree = render(Toolbar, { showRefresh: false });
+    const tree = render(Toolbar, { showActions: false });
     const subtitle = tree.texts.filter((text) => text.trim() !== '');
     const long = subtitle.filter((text) => text.length > 24);
     assert.deepEqual(long, [], `出现长文案：${long.join(' | ')}`);

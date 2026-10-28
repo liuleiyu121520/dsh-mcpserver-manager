@@ -91,3 +91,55 @@ export function EmptyIcon({ size = 48 }) {
     </svg>
   );
 }
+
+/**
+ * 心跳（健康检查按钮）。
+ * @param {{size?: number}} props 属性。
+ * @returns {JSX.Element} 图标。
+ */
+export function PulseIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1.5 8.5h2.6l1.5-3.5 2.4 7 1.7-3.5h4.8" />
+    </svg>
+  );
+}
+
+/**
+ * 折叠箭头（工具列表展开/收起）。
+ * @param {{size?: number, open?: boolean}} props 属性。
+ * @returns {JSX.Element} 图标。
+ */
+export function ChevronIcon({ size = 16, open = false }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={open === true ? 'dshmcp-chevron is-open' : 'dshmcp-chevron'}
+      aria-hidden="true"
+    >
+      <path d="M6 4.5 9.5 8 6 11.5" />
+    </svg>
+  );
+}
+
+/**
+ * 下载/更新（有新版本横幅）。
+ * @param {{size?: number}} props 属性。
+ * @returns {JSX.Element} 图标。
+ */
+export function DownloadIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 2.5v7" />
+      <path d="M5 6.5 8 9.5l3-3" />
+      <path d="M2.5 11.5v1a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1" />
+    </svg>
+  );
+}

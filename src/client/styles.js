@@ -182,4 +182,104 @@ export const CSS = `
   background: var(--dsw-alias-bg-layer-1, #f9fafb);
   box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l2, #e5e7eb);
 }
+
+/*
+ * 版本号做成按钮（点它手动检查更新）：纯文本的话没人知道那里能点，
+ * 用虚下划线给一个"可以点"的最低暗示，又不至于像链接那样抢注意力。
+ */
+.dshmcp-version {
+  margin-left: 8px; padding: 0; border: none; background: transparent; cursor: pointer;
+  font-size: 11px; line-height: 16px; font-family: var(--dsw-font-family, inherit);
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  text-decoration: underline dotted;
+}
+.dshmcp-version:hover:not(:disabled) { color: var(--dsw-alias-label-primary, #1f2328); }
+.dshmcp-version:disabled { cursor: progress; }
+
+/* 旋转动画只作用于 svg：按钮本身的边框/背景不该跟着转。 */
+.dshmcp-spin svg { animation: dshmcp-spin-turn 900ms linear infinite; }
+@keyframes dshmcp-spin-turn { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.dshmcp-chevron { flex: 0 0 auto; transition: transform 120ms ease; }
+.dshmcp-chevron.is-open { transform: rotate(90deg); }
+
+/*
+ * 开关。尺寸固定 32×18（拇指 14 + 两侧 2px 留白），点击热区由按钮自身撑开，
+ * 比"让用户去点一个 14px 的圆点"可靠得多。
+ */
+.dshmcp-switch {
+  position: relative; flex: 0 0 auto; width: 32px; height: 18px; padding: 0;
+  border: none; border-radius: 9px; cursor: pointer;
+  background: var(--dsw-alias-label-dimmed, #9ca3af);
+  transition: background 120ms ease;
+}
+.dshmcp-switch.is-on { background: var(--dsw-alias-state-business-primary, #2563eb); }
+.dshmcp-switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.dshmcp-switch-knob {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--dsw-alias-label-primary-foreground, #ffffff);
+  transition: transform 120ms ease;
+}
+.dshmcp-switch.is-on .dshmcp-switch-knob { transform: translateX(14px); }
+
+.dshmcp-tools { margin-top: 12px; }
+.dshmcp-tools-toggle {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: none;
+  background: transparent; cursor: pointer;
+  font-size: 11px; line-height: 16px; font-family: var(--dsw-font-family, inherit);
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+.dshmcp-tools-toggle:hover { color: var(--dsw-alias-label-primary, #1f2328); }
+.dshmcp-tools-note { margin-top: 8px; font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #6b7280); }
+.dshmcp-tools-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.dshmcp-tool { padding: 8px 12px; border-radius: 8px; background: var(--dsw-alias-bg-layer-1, #f9fafb); }
+.dshmcp-tool-head { display: flex; align-items: center; gap: 8px; }
+.dshmcp-tool-name {
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary, #1f2328);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dshmcp-tool-params { margin-left: auto; flex: 0 0 auto; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #6b7280); }
+.dshmcp-tool-desc {
+  margin-top: 2px; font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-tertiary, #6b7280);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* 健康检查结论：左侧色条区分三档，"需留意"和"连不上"必须一眼分得开。 */
+.dshmcp-health {
+  display: flex; align-items: flex-start; gap: 8px; margin-top: 12px;
+  padding: 8px 12px; border-radius: 8px;
+  font-size: 11px; line-height: 16px;
+  background: var(--dsw-alias-bg-layer-1, #f9fafb);
+  border-left: 3px solid var(--dsw-alias-label-dimmed, #9ca3af);
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+.dshmcp-health.is-ok { border-left-color: var(--dsw-alias-state-success-primary, #16a34a); }
+.dshmcp-health.is-warn { border-left-color: var(--dsw-alias-state-warning-primary, #d97706); }
+.dshmcp-health.is-bad { border-left-color: var(--dsw-alias-state-error-primary, #dc2626); }
+.dshmcp-health.is-off { border-left-color: var(--dsw-alias-label-dimmed, #9ca3af); }
+.dshmcp-health-title { flex: 0 0 auto; font-weight: 600; }
+.dshmcp-health-detail { flex: 1 1 auto; min-width: 0; color: var(--dsw-alias-label-tertiary, #6b7280); }
+
+/* 有新版横幅：中性样式而不是错误红——"有新版本"不是故障。 */
+.dshmcp-banner.is-update {
+  color: var(--dsw-alias-label-primary, #1f2328);
+  border-left-color: var(--dsw-alias-state-business-primary, #2563eb);
+}
+
+/* 操作结果提示：底部居中，短、可读、自己消失，不需要用户关。 */
+.dshmcp-toast {
+  position: fixed; left: 50%; bottom: 24px; z-index: 60;
+  max-width: calc(100vw - 48px); padding: 8px 16px; border-radius: 8px;
+  transform: translateX(-50%);
+  font-size: 12px; line-height: 18px; font-family: var(--dsw-font-family, inherit);
+  color: var(--dsw-alias-label-primary, #1f2328);
+  background: var(--dsw-alias-bg-layer-2, #ffffff);
+  box-shadow: var(--dsw-alias-shadow, 0 8px 24px rgba(0, 0, 0, 0.16)), inset 0 0 0 1px var(--dsw-alias-border-l3, #e5e7eb);
+  animation: dshmcp-toast-in 160ms ease-out;
+}
+@keyframes dshmcp-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
 `;

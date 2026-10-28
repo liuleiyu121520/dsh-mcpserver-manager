@@ -15,9 +15,19 @@ import { ServerCard } from './ServerCard.jsx';
  * @param {boolean} [props.busy] 是否有操作进行中。
  * @param {(name: string, enabled: boolean) => void} props.onToggle 启停。
  * @param {(name: string) => void} props.onRemove 删除。
+ * @param {(name: string) => Promise<object|null>} props.onHealth 健康检查。
+ * @param {(name: string) => Promise<object|null>} props.onLoadTools 读工具表。
  * @returns {JSX.Element} 列表。
  */
-export function ServerList({ items, highlighted = '', busy = false, onToggle, onRemove }) {
+export function ServerList({
+  items,
+  highlighted = '',
+  busy = false,
+  onToggle,
+  onRemove,
+  onHealth,
+  onLoadTools,
+}) {
   const managed = items.filter((item) => item.managed === true);
   const readonly = items.filter((item) => item.managed !== true);
   return (
@@ -32,6 +42,8 @@ export function ServerList({ items, highlighted = '', busy = false, onToggle, on
               busy={busy}
               onToggle={onToggle}
               onRemove={onRemove}
+              onHealth={onHealth}
+              onLoadTools={onLoadTools}
             />
           ))}
         </div>
@@ -46,6 +58,8 @@ export function ServerList({ items, highlighted = '', busy = false, onToggle, on
               busy={busy}
               onToggle={onToggle}
               onRemove={onRemove}
+              onHealth={onHealth}
+              onLoadTools={onLoadTools}
             />
           ))}
         </div>

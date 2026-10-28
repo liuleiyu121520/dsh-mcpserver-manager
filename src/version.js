@@ -9,5 +9,8 @@
  * Host 在 `GET /servers` 里带上自己的版本，页面拿它跟这个常量比，不一致就明说
  * 「运行中的 Host 是旧版本，重启 DSH」。**版本号必须与 package.json 一致**，
  * 由 `tests/version.test.js` 守着。
+ *
+ * 它同时是**在线更新检查的"当前版本"**（`update.js`）。刻意不从 package.json
+ * 读：升级后运行中的 Host 还是旧代码，读文件会得出"已是最新"的假结论。
  */
-export const PLUGIN_VERSION = '0.3.0';
+export const PLUGIN_VERSION = '0.4.0';

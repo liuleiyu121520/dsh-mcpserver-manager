@@ -43,6 +43,49 @@ export function messageFor(code) {
 }
 
 /**
+ * 健康结论 → 一句短标签（卡片、toast 共用）。
+ *
+ * 文案刻意不用 "健康/不健康"：`degraded`（连得上但没注册工具、需要鉴权）既
+ * 不是"坏"也不是"好"，用一个二值标签会把人骗过去。
+ * @type {Readonly<Record<string, string>>}
+ */
+export const HEALTH_LABEL = Object.freeze({
+  healthy: '正常',
+  degraded: '需留意',
+  unreachable: '连不上',
+  disabled: '已停用',
+  unknown: '未知',
+});
+
+/**
+ * 健康结论 → 状态类名。
+ *
+ * 显式映射而不是 `` `is-${status}` ``：拼出来的类名在 CSS 里对不上号时不会报错，
+ * 只会安静地没有颜色——那种问题肉眼极难发现。
+ * @type {Readonly<Record<string, string>>}
+ */
+const HEALTH_CLASS = Object.freeze({
+  healthy: 'is-ok',
+  degraded: 'is-warn',
+  unreachable: 'is-bad',
+  disabled: 'is-off',
+  unknown: 'is-off',
+});
+
+/**
+ * 取健康结论的展示信息。
+ * @param {string} status 状态。
+ * @returns {{label: string, className: string}} 文案与类名。
+ */
+export function healthView(status) {
+  const key = typeof status === 'string' ? status : 'unknown';
+  return {
+    label: HEALTH_LABEL[key] ?? HEALTH_LABEL.unknown,
+    className: HEALTH_CLASS[key] ?? HEALTH_CLASS.unknown,
+  };
+}
+
+/**
  * 发一个请求并拆信封。
  *
  * @param {string} path 以 `/` 开头的路径。
@@ -125,4 +168,65 @@ export function toggleServer(serverName, enabled) {
     method: 'POST',
     body: JSON.stringify({ enabled }),
   });
+}
+
+/**
+ * GET /servers/<name>/tools —— 该服务器注册了哪些工具。
+ *
+ * 懒加载而不是塞进列表快照：列表只显示数量，描述文本只有在用户真的要看的
+ * 时候才值得下载。
+ * @param {string} serverName 身份键。
+ * @returns {Promise<object>} `{serverName, available, count, tools}`。
+ */
+export function listServerTools(serverName) {
+  return request(`/servers/${encodeURIComponent(serverName)}/tools`);
+}
+
+/**
+ * POST /servers/<name>/check —— 健康检查。
+ * @param {string} serverName 身份键。
+ * @returns {Promise<object>} `{report}`。
+ */
+export function checkServerHealth(serverName) {
+  return request(`/servers/${encodeURIComponent(serverName)}/check`, { method: 'POST', body: '{}' });
+}
+
+/**
+ * GET /update —— 版本检查的缓存结论（不触发网络请求）。
+ * @returns {Promise<object>} 结论。
+ */
+export function getUpdateState() {
+  return request('/update');
+}
+
+/**
+ * POST /update/check —— 真的去 GitHub 查一次。
+ * @returns {Promise<object>} 结论。
+ */
+export function checkUpdateState() {
+  return request('/update/check', { method: 'POST', body: '{}' });
+}
+
+/**
+ * POST /update —— 忽略当前这个新版本。
+ * @returns {Promise<object>} 结论。
+ */
+export function dismissUpdate() {
+  return request('/update', { method: 'POST', body: '{}' });
+}
+
+/**
+ * POST /upgrade —— 开始原地升级（立刻返回，进度靠轮询）。
+ * @returns {Promise<object>} `{running, ...}`。
+ */
+export function beginUpgrade() {
+  return request('/upgrade', { method: 'POST', body: '{}' });
+}
+
+/**
+ * GET /upgrade —— 升级进度。
+ * @returns {Promise<object>} `{running, result, error, update}`。
+ */
+export function readUpgradeState() {
+  return request('/upgrade');
 }

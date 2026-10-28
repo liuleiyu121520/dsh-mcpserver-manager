@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { apply } from '../src/index.js';
 import { BEGIN_ANCHOR, END_ANCHOR, createPatchStore } from '../src/patch-store.js';
-import { PREFIX, SERVERS_PATH, registerRoutes, serverNameFromPath } from '../src/routes.js';
+import { PREFIX, SERVERS_PATH, UPDATE_CHECK_PATH, UPDATE_PATH, UPGRADE_PATH, registerRoutes, serverNameFromPath } from '../src/routes.js';
 import { PLUGIN_VERSION } from '../src/version.js';
 
 /** @type {string} */
@@ -124,9 +124,18 @@ after(() => {
 });
 
 describe('routes · 端点与信封', () => {
-  it('注册了 exact 与 prefix 两条路由', () => {
-    assert.equal(routes.length, 2);
-    assert.deepEqual(routes.map((route) => route.kind).sort(), ['exact', 'prefix']);
+  it('注册了两条 servers 路由 + 三条版本路由', () => {
+    assert.deepEqual(
+      routes.map((route) => `${route.kind} ${route.path}`),
+      [
+        `exact ${SERVERS_PATH}`,
+        `prefix ${SERVERS_PATH}`,
+        `exact ${UPDATE_PATH}`,
+        `exact ${UPDATE_CHECK_PATH}`,
+        `exact ${UPGRADE_PATH}`,
+      ],
+      '路由清单变了就要同步改这条断言（多一条静默的端点比少一条更危险）',
+    );
     assert.equal(SERVERS_PATH, `${PREFIX}/servers`);
   });
 
@@ -466,7 +475,8 @@ describe('routes · 装配层读宿主 profileContext（BUG-2 回归）', () => 
     /** @type {Array<{kind: string, path: string, handler: Function}>} */
     const table = [];
     assert.doesNotThrow(() => apply(createCtx(table), { dshHome: dir }));
-    assert.equal(table.length, 2);
+    // 2 条 servers + 3 条版本（版本路由不依赖 ctx.get，注册时不探测服务）。
+    assert.equal(table.length, 5);
   });
 });
 
@@ -758,6 +768,249 @@ describe('routes · 回落时必须留痕（可诊断性）', () => {
       if (savedDshHome === undefined) delete process.env.DSH_HOME;
       else process.env.DSH_HOME = savedDshHome;
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routes · 工具列表与健康检查', () => {
+  /**
+   * 造一套完全隔离的路由 + 假 tools 服务。
+   *
+   * 假服务里刻意混入一个宿主自带工具（`bash`）与另一个服务器的工具：
+   * 命名空间过滤错了的话，这两个数字会跑进 `demo` 的账上。
+   * @returns {{call: Function, close: () => void, logs: string[]}} 调用器与清理。
+   */
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-tools-'));
+    const file = join(root, 'cordis.patch.yml');
+    writeFileSync(file, '# 空文件\n');
+    const store = createPatchStore({ filePath: file });
+    /** @type {Array<{kind: string, path: string, handler: Function}>} */
+    const table = [];
+    /** @type {string[]} */
+    const logs = [];
+    const service = {
+      view: () => ({
+        visible: new Map([
+          ['mcp__demo__ping', { description: '探活', parameters: { type: 'object', properties: {} } }],
+          ['mcp__demo__echo', { description: '回声', parameters: { type: 'object', properties: { text: {} } } }],
+          ['mcp__other__x', { description: '别人的', parameters: { type: 'object', properties: {} } }],
+          ['bash', { description: '宿主的', parameters: { type: 'object', properties: {} } }],
+        ]),
+      }),
+    };
+    registerRoutes(
+      {
+        connection: { requestRejection: () => undefined },
+        webServer: {
+          register(route) {
+            table.push(route);
+            return () => {};
+          },
+        },
+        effect: (fn) => fn(),
+        get: (name) => (name === 'tools' ? service : undefined),
+      },
+      store,
+      (line) => logs.push(line),
+    );
+    return {
+      call: (method, url, body) => dispatch(table, method, url, body),
+      logs,
+      close: () => rmSync(root, { recursive: true, force: true }),
+    };
+  };
+
+  it('GET /servers 给每个条目挂上工具数（只数本命名空间）', async () => {
+    const env = setup();
+    try {
+      await env.call('POST', SERVERS_PATH, JSON.stringify({ raw: rawFor('demo') }));
+      const { payload } = await env.call('GET', SERVERS_PATH);
+      const entry = payload.data.items.find((item) => item.serverName === 'demo');
+      assert.equal(entry.toolCount, 2, '只该数 mcp__demo__ 前缀下的两个');
+      assert.equal(entry.toolsAvailable, true);
+      assert.equal(JSON.stringify(payload).includes('mcp__demo__'), false, '列表不该把工具名塞进来');
+    } finally {
+      env.close();
+    }
+  });
+
+  it('GET /servers/<name>/tools 返回具体工具（不含别人的命名空间）', async () => {
+    const env = setup();
+    try {
+      await env.call('POST', SERVERS_PATH, JSON.stringify({ raw: rawFor('demo') }));
+      const { statusCode, payload } = await env.call('GET', `${SERVERS_PATH}/demo/tools`);
+      assert.equal(statusCode, 200);
+      assert.equal(payload.data.available, true);
+      assert.equal(payload.data.count, 2);
+      assert.deepEqual(payload.data.tools.map((tool) => tool.rawName), ['echo', 'ping']);
+      assert.equal(payload.data.tools[0].parameters, 1);
+    } finally {
+      env.close();
+    }
+  });
+
+  it('GET /servers/<name>/tools 对不存在的条目回 404', async () => {
+    const env = setup();
+    try {
+      const { statusCode, payload } = await env.call('GET', `${SERVERS_PATH}/ghost/tools`);
+      assert.equal(statusCode, 404);
+      assert.equal(payload.error.code, 'unknown-server');
+    } finally {
+      env.close();
+    }
+  });
+
+  it('POST /servers/<name>/check 有工具就 healthy，结论落在 data.report 里', async () => {
+    const env = setup();
+    try {
+      await env.call('POST', SERVERS_PATH, JSON.stringify({ raw: rawFor('demo') }));
+      const { statusCode, payload } = await env.call('POST', `${SERVERS_PATH}/demo/check`, '{}');
+      assert.equal(statusCode, 200, '健康检查失败也要 200——结论本身就是数据');
+      assert.equal(payload.data.report.status, 'healthy');
+      assert.equal(payload.data.report.tools, 2);
+      assert.ok(env.logs.some((line) => line.includes('check demo status=healthy')), env.logs.join(' | '));
+    } finally {
+      env.close();
+    }
+  });
+
+  it('停用的条目直接给 disabled，不去探测', async () => {
+    const env = setup();
+    try {
+      await env.call(
+        'POST',
+        SERVERS_PATH,
+        JSON.stringify({ raw: JSON.stringify({ serverName: 'off', transport: 'stdio', command: 'npx', disabled: true }) }),
+      );
+      const { payload } = await env.call('POST', `${SERVERS_PATH}/off/check`, '{}');
+      assert.equal(payload.data.report.status, 'disabled');
+    } finally {
+      env.close();
+    }
+  });
+
+  it('GET 打 check / POST 打 tools 都要 405', async () => {
+    const env = setup();
+    try {
+      await env.call('POST', SERVERS_PATH, JSON.stringify({ raw: rawFor('demo') }));
+      assert.equal((await env.call('GET', `${SERVERS_PATH}/demo/check`)).statusCode, 405);
+      assert.equal((await env.call('POST', `${SERVERS_PATH}/demo/tools`, '{}')).statusCode, 405);
+    } finally {
+      env.close();
+    }
+  });
+});
+
+describe('routes · 版本检查端点', () => {
+  /**
+   * 造一套带假 updater 的路由（不联网）。
+   * @returns {{call: Function, calls: object, close: () => void}} 调用器与记录。
+   */
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-upd-'));
+    const file = join(root, 'cordis.patch.yml');
+    writeFileSync(file, '# 空文件\n');
+    const store = createPatchStore({ filePath: file });
+    /** @type {Array<{kind: string, path: string, handler: Function}>} */
+    const table = [];
+    /** @type {{check: number, dismiss: number, start: number}} */
+    const calls = { check: 0, dismiss: 0, start: 0 };
+    const payload = { current: '0.4.0', latest: '0.5.0', updateAvailable: true, dismissed: false, enabled: true, error: null, checkedAt: null, url: null };
+    const updater = {
+      payload: () => payload,
+      check: async () => {
+        calls.check += 1;
+        return payload;
+      },
+      dismiss: async () => {
+        calls.dismiss += 1;
+        return { ...payload, dismissed: true };
+      },
+      startUpgrade: () => {
+        calls.start += 1;
+        return { running: true, startedAt: 'now', finishedAt: null, result: null, error: null };
+      },
+      upgradeState: () => ({ running: false, startedAt: 'now', finishedAt: 'later', result: null, error: null }),
+    };
+    registerRoutes(
+      {
+        connection: { requestRejection: () => undefined },
+        webServer: {
+          register(route) {
+            table.push(route);
+            return () => {};
+          },
+        },
+        effect: (fn) => fn(),
+      },
+      store,
+      () => {},
+      { updater },
+    );
+    return {
+      call: (method, url, body) => dispatch(table, method, url, body),
+      calls,
+      close: () => rmSync(root, { recursive: true, force: true }),
+    };
+  };
+
+  it('GET /update 只读缓存，不触发网络请求', async () => {
+    const env = setup();
+    try {
+      const { statusCode, payload } = await env.call('GET', UPDATE_PATH);
+      assert.equal(statusCode, 200);
+      assert.equal(payload.data.updateAvailable, true);
+      assert.equal(env.calls.check, 0, '打开页面不该打 GitHub');
+    } finally {
+      env.close();
+    }
+  });
+
+  it('POST /update/check 才真的查一次', async () => {
+    const env = setup();
+    try {
+      const { payload } = await env.call('POST', UPDATE_CHECK_PATH, '{}');
+      assert.equal(env.calls.check, 1);
+      assert.equal(payload.data.latest, '0.5.0');
+    } finally {
+      env.close();
+    }
+  });
+
+  it('POST /update 忽略当前版本', async () => {
+    const env = setup();
+    try {
+      const { payload } = await env.call('POST', UPDATE_PATH, '{}');
+      assert.equal(env.calls.dismiss, 1);
+      assert.equal(payload.data.dismissed, true);
+    } finally {
+      env.close();
+    }
+  });
+
+  it('POST /upgrade 立刻返回 running:true，GET /upgrade 读进度', async () => {
+    const env = setup();
+    try {
+      const started = await env.call('POST', UPGRADE_PATH, '{}');
+      assert.equal(env.calls.start, 1);
+      assert.equal(started.payload.data.running, true);
+      const progress = await env.call('GET', UPGRADE_PATH);
+      assert.equal(progress.payload.data.running, false);
+      assert.equal(progress.payload.data.update.current, '0.4.0');
+    } finally {
+      env.close();
+    }
+  });
+
+  it('PUT 打 /update → 405 method-not-allowed', async () => {
+    const env = setup();
+    try {
+      const { statusCode, payload } = await env.call('PUT', UPDATE_PATH);
+      assert.equal(statusCode, 405);
+      assert.equal(payload.error.code, 'method-not-allowed');
+    } finally {
+      env.close();
     }
   });
 });

@@ -6,14 +6,17 @@
  */
 import { isAbsolute } from 'node:path';
 
-/** @typedef {{ profile: string, backup: boolean, dshHome: string, patchFile: string }} PluginConfig */
+/** @typedef {{ profile: string, backup: boolean, dshHome: string, patchFile: string, probeHeaders: boolean }} PluginConfig */
 
 /**
  * 默认值。
  *
  * - `dshHome` 为空串表示「未显式指定」，此时走宿主 `profileContext` → `$DSH_HOME` → `~/.dsh`；
  * - `patchFile` 为空串表示「未显式指定到文件」，是给测试与高级用户的**最高优先级**
- *   逃生门：正常运行永远走宿主给的 `profileContext.patchPath`。
+ *   逃生门：正常运行永远走宿主给的 `profileContext.patchPath`；
+ * - `probeHeaders` 决定健康检查**要不要带上条目里配置的请求头**。默认 `true`：
+ *   不带的话，任何需要鉴权的服务都只能回一句"401 需要鉴权"，探测等于没用。
+ *   介意密钥离开宿主的话可以关掉，代价是那类服务永远只能得到"需留意"。
  * @type {Readonly<PluginConfig>}
  */
 export const DEFAULT_CONFIG = Object.freeze({
@@ -21,6 +24,7 @@ export const DEFAULT_CONFIG = Object.freeze({
   backup: true,
   dshHome: '',
   patchFile: '',
+  probeHeaders: true,
 });
 
 /** profile 名的合法形状：目录名，只允许安全字符。 */
@@ -53,5 +57,7 @@ export function normalizeConfig(raw) {
     isAbsolute(source.patchFile.trim())
       ? source.patchFile.trim()
       : DEFAULT_CONFIG.patchFile;
-  return { profile, backup, dshHome, patchFile };
+  const probeHeaders =
+    typeof source.probeHeaders === 'boolean' ? source.probeHeaders : DEFAULT_CONFIG.probeHeaders;
+  return { profile, backup, dshHome, patchFile, probeHeaders };
 }

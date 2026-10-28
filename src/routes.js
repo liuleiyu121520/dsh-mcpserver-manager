@@ -224,7 +224,8 @@ export function registerRoutes(ctx, store, logger = () => {}, options = {}) {
   if (store === undefined || store === null) {
     throw new TypeError('dsh-mcpserver-manager routes: store is required');
   }
-  const { updater = null } = options;
+  // 健康检查要不要带条目里配的请求头（默认带；见 `config.js` 的 `probeHeaders`）。
+  const { updater = null, probeHeaders = true } = options;
   // `tools` 服务**必须每个请求现取**，不能在注册时取一次存下来：cordis 的服务
   // 可以晚于本插件 provide（`ctx.tools` 由 dsh-tools 提供），注册那一刻取到的
   // 很可能还是 undefined——存下来就等于永久失去工具列表。`ctx.get` 是一次
@@ -335,11 +336,13 @@ export function registerRoutes(ctx, store, logger = () => {}, options = {}) {
       const item = snapshot.items.find((entry) => entry.serverName === name);
       if (item === undefined) throw codedError('unknown-server', '该条目已不存在，请刷新列表');
       const counts = countFor(toolServiceOf(ctx), name);
-      // 探测本身不发密钥、不动文件，只是把结论算出来；失败也返回 200（结论
-      // 就是 "unreachable"），只有请求本身不合法才走错误分支。
+      // 探测不动文件，只把结论算出来；失败也返回 200（结论就是 "unreachable"），
+      // 只有请求本身不合法才走错误分支。`sendSecrets` 默认 true：带上条目里
+      // 配置的请求头去探，否则需要鉴权的服务永远只能回一句"401 需要鉴权"。
       const report = await checkServer(item, {
         toolCount: counts.count,
         toolsAvailable: counts.available,
+        sendSecrets: probeHeaders !== false,
         logger,
       });
       logger(`check ${name} status=${report.status} tools=${String(counts.count)}`);

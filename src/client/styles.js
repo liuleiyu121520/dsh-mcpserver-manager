@@ -24,6 +24,24 @@ export const CSS = `
 .dshmcp-path { font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
 .dshmcp-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
+.dshmcp-target {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1, #f9fafb);
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-border-l1, #e5e7eb);
+}
+.dshmcp-target-label {
+  flex: 0 0 auto; font-size: 11px; line-height: 16px; font-weight: 600;
+  letter-spacing: 0.02em; color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+.dshmcp-target-path {
+  min-width: 0; font-size: 12px; line-height: 18px;
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--dsw-alias-label-primary, #1f2328);
+  overflow-wrap: anywhere;
+}
+.dshmcp-target-note { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, #6b7280); }
+
 .dshmcp-btn {
   display: inline-flex; align-items: center; gap: 4px;
   height: 32px; padding: 0 12px; border: none; border-radius: 8px;

@@ -5,7 +5,7 @@
  * 所有用例都在内存 fs / tmp 目录里跑，**绝不触碰真实配置文件**。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -683,6 +683,100 @@ describe('patch-store · 真实文件系统往返', () => {
       assert.ok(removed.includes('# 别动我'), '删除不该碰段外注释');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('patch-store · 目标文件由宿主 profileContext 决定（BUG-2 回归）', () => {
+  /**
+   * 建一棵 `<root>/.dsh/profiles/{web,desktop}` 的临时树。
+   * @returns {{root: string, dshHome: string, desktop: string, web: string}} 路径集合。
+   */
+  const tree = () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-profile-'));
+    const dshHome = join(root, '.dsh');
+    const desktop = join(dshHome, 'profiles', 'desktop', 'cordis.patch.yml');
+    const web = join(dshHome, 'profiles', 'web', 'cordis.patch.yml');
+    mkdirSync(join(dshHome, 'profiles', 'desktop'), { recursive: true });
+    mkdirSync(join(dshHome, 'profiles', 'web'), { recursive: true });
+    writeFileSync(web, '# web profile：不该被改\n');
+    return { root, dshHome, desktop, web };
+  };
+
+  it('profileContext.patchPath 优先：desktop 宿主的配置绝不写进 web 文件', async () => {
+    const { root, dshHome, desktop, web } = tree();
+    try {
+      const store = createPatchStore({
+        // 故意把回落链指向 web：profileContext 必须压过它。
+        config: { dshHome, profile: 'web' },
+        env: { HOME: root },
+        profileContext: { name: 'desktop', dir: join(dshHome, 'profiles', 'desktop'), patchPath: desktop, home: dshHome },
+      });
+      assert.equal(store.filePath, desktop);
+      assert.equal(store.profile, 'desktop');
+      assert.equal(store.dshHome, dshHome);
+      assert.equal(store.source, 'profileContext');
+      assert.equal(store.fileDisplay, '~/.dsh/profiles/desktop/cordis.patch.yml');
+
+      await store.add(configJson('gh'));
+      assert.ok(readFileSync(desktop, 'utf8').includes("serverName: 'gh'"), 'desktop 文件必须被写入');
+      assert.equal(readFileSync(web, 'utf8'), '# web profile：不该被改\n', 'web 文件一个字节都不该动');
+
+      const snapshot = await store.read();
+      assert.equal(snapshot.file, desktop);
+      assert.equal(snapshot.profile, 'desktop');
+      assert.equal(snapshot.source, 'profileContext');
+      assert.equal(snapshot.fileDisplay, '~/.dsh/profiles/desktop/cordis.patch.yml');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('没有 profileContext 时按 config.dshHome + profile 回落，且不崩', async () => {
+    const { root, dshHome, desktop } = tree();
+    try {
+      const store = createPatchStore({
+        config: { dshHome, profile: 'desktop' },
+        env: { HOME: root },
+        profileContext: undefined,
+      });
+      assert.equal(store.filePath, desktop);
+      assert.equal(store.profile, 'desktop');
+      assert.equal(store.source, 'config.dshHome');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('config.patchFile 连 profileContext 都能压过（逃生门）', async () => {
+    const { root, dshHome, desktop } = tree();
+    const custom = join(root, 'custom', 'cordis.patch.yml');
+    try {
+      const store = createPatchStore({
+        config: { patchFile: custom },
+        env: { HOME: root },
+        profileContext: { name: 'desktop', patchPath: desktop, home: dshHome },
+      });
+      assert.equal(store.filePath, custom);
+      assert.equal(store.source, 'config.patchFile');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('显式注入 filePath 仍然最高优先（测试注入面不变）', () => {
+    const { root, dshHome, desktop } = tree();
+    const injected = join(root, 'injected.yml');
+    try {
+      const store = createPatchStore({
+        filePath: injected,
+        config: { patchFile: join(root, 'config.yml') },
+        env: { HOME: root },
+        profileContext: { name: 'desktop', patchPath: desktop, home: dshHome },
+      });
+      assert.equal(store.filePath, injected);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

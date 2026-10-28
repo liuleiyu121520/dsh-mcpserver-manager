@@ -126,6 +126,10 @@ export function McpManager() {
 
   const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
   const fileDisplay = typeof snapshot?.fileDisplay === 'string' ? snapshot.fileDisplay : '';
+  // profile 与 source 都来自后端快照：页面显示的 profile 必须和真正写入的文件
+  // 同源，否则「说的」和「写的」又会分叉（BUG-2 的形态）。
+  const profile = typeof snapshot?.profile === 'string' ? snapshot.profile : '';
+  const source = typeof snapshot?.source === 'string' ? snapshot.source : '';
   const taken = snapshot?.taken ?? { serverNames: [], ids: [] };
   const anchorsBroken = snapshot?.anchors === 'broken';
 
@@ -135,6 +139,8 @@ export function McpManager() {
 
       <Toolbar
         fileDisplay={fileDisplay}
+        profile={profile}
+        source={source}
         busy={busy}
         onAdd={() => {
           setBanner('');

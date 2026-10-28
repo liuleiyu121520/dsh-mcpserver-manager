@@ -353,3 +353,203 @@ describe('routes · serverNameFromPath', () => {
     }
   });
 });
+
+describe('routes · 装配层读宿主 profileContext（BUG-2 回归）', () => {
+  /**
+   * 造一个带 `get()` 的假 ctx（真宿主用 `ctx.get('profileContext')` 取服务）。
+   * @param {Array<{kind: string, path: string, handler: Function}>} sink 路由收集器。
+   * @param {() => unknown} get 服务提供者。
+   * @param {string[]} logs info 通道收集器。
+   * @param {object} [loggerOverride] 完整 logger 替身（默认只有一个 info）。
+   * @returns {object} ctx。
+   */
+  const ctxWithServices = (sink, get, logs, loggerOverride = undefined) => ({
+    connection: { requestRejection: () => undefined },
+    webServer: {
+      register(route) {
+        sink.push(route);
+        return () => {};
+      },
+    },
+    effect(fn) {
+      return fn();
+    },
+    get,
+    logger: loggerOverride ?? { info: (line) => logs.push(line) },
+  });
+
+  it('desktop 宿主：写入 profileContext.patchPath，响应回传 profile / source', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-ctx-'));
+    const desktop = join(root, 'profiles', 'desktop', 'cordis.patch.yml');
+    const web = join(root, 'profiles', 'web', 'cordis.patch.yml');
+    mkdirSync(join(root, 'profiles', 'desktop'), { recursive: true });
+    mkdirSync(join(root, 'profiles', 'web'), { recursive: true });
+    writeFileSync(web, '# web：不该被改\n');
+    try {
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      /** @type {string[]} */
+      const logs = [];
+      apply(
+        ctxWithServices(
+          table,
+          (name) => (name === 'profileContext' ? { name: 'desktop', patchPath: desktop, home: root } : undefined),
+          logs,
+        ),
+        // 显式配置仍指向 web：宿主上下文必须压过它。
+        { dshHome: root, profile: 'web' },
+      );
+
+      const created = await dispatch(table, 'POST', SERVERS_PATH, JSON.stringify({ raw: rawFor('ctx') }));
+      assert.equal(created.statusCode, 201);
+      assert.ok(readFileSync(desktop, 'utf8').includes('serverName'), 'desktop 文件必须被写入');
+      assert.equal(readFileSync(web, 'utf8'), '# web：不该被改\n', 'web 文件不该被碰');
+
+      const read = await dispatch(table, 'GET', SERVERS_PATH);
+      assert.equal(read.statusCode, 200);
+      assert.equal(read.payload.data.profile, 'desktop');
+      assert.equal(read.payload.data.source, 'profileContext');
+      assert.equal(read.payload.data.file, desktop);
+
+      // 日志里必须能核对自己被写进了哪个 profile 的哪个文件。
+      const mounted = logs.find((line) => line.includes('mounted'));
+      assert.ok(mounted !== undefined, `缺 mounted 日志：${logs.join(' | ')}`);
+      assert.ok(mounted.includes('profile=desktop'), mounted);
+      assert.ok(mounted.includes('cordis.patch.yml'), mounted);
+      assert.ok(mounted.includes('source=profileContext'), mounted);
+      // 走宿主权威路径时不该有回落警告（警告要留给真正出事的情况）。
+      assert.deepEqual(logs.filter((line) => line.includes('[WARN]')), [], logs.join(' | '));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ctx.get 抛错（服务未提供）时静默回落，不阻断激活', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-noctx-'));
+    mkdirSync(join(root, 'profiles', 'web'), { recursive: true });
+    try {
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      assert.doesNotThrow(() =>
+        apply(
+          ctxWithServices(
+            table,
+            () => {
+              throw new Error('service profileContext not provided');
+            },
+            [],
+          ),
+          { dshHome: root },
+        ),
+      );
+      const read = await dispatch(table, 'GET', SERVERS_PATH);
+      assert.equal(read.statusCode, 200);
+      assert.equal(read.payload.data.profile, 'web');
+      assert.equal(read.payload.data.source, 'config.dshHome');
+      assert.equal(read.payload.data.file, join(root, 'profiles', 'web', 'cordis.patch.yml'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('假 ctx 没有 ctx.get 这个方法时也不崩（测试/旧宿主）', () => {
+    /** @type {Array<{kind: string, path: string, handler: Function}>} */
+    const table = [];
+    assert.doesNotThrow(() => apply(createCtx(table), { dshHome: dir }));
+    assert.equal(table.length, 2);
+  });
+});
+
+describe('routes · 回落时必须留痕（可诊断性）', () => {
+  /**
+   * 造一个带 `get()` 的假 ctx（同上一组，独立一份是为了不跨 describe 依赖）。
+   * @param {Array<{kind: string, path: string, handler: Function}>} sink 路由收集器。
+   * @param {() => unknown} get 服务提供者。
+   * @param {object} logger 日志替身。
+   * @returns {object} ctx。
+   */
+  const ctxWith = (sink, get, logger) => ({
+    connection: { requestRejection: () => undefined },
+    webServer: {
+      register(route) {
+        sink.push(route);
+        return () => {};
+      },
+    },
+    effect: (fn) => fn(),
+    get,
+    logger,
+  });
+
+  it('宿主未提供 profileContext → 走 logger.warn，文案写清来源与路径', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-warn-'));
+    mkdirSync(join(root, 'profiles', 'web'), { recursive: true });
+    try {
+      /** @type {string[]} */
+      const infos = [];
+      /** @type {string[]} */
+      const warns = [];
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      apply(
+        ctxWith(table, () => undefined, {
+          info: (line) => infos.push(line),
+          warn: (line) => warns.push(line),
+        }),
+        { dshHome: root },
+      );
+
+      assert.equal(warns.length, 1, `应恰好一条 warn：${warns.join(' | ')}`);
+      const line = warns[0];
+      assert.ok(line.includes('[WARN]'), line);
+      assert.ok(line.includes('宿主未提供 profileContext'), line);
+      assert.ok(line.includes('config.dshHome'), `应写清回落来源：${line}`);
+      assert.ok(line.includes('cordis.patch.yml'), `应写清回落路径：${line}`);
+      assert.ok(line.includes('profile=web'), `应写清实际 profile：${line}`);
+      // warn 归 warn，info 归 info：不要在两处重复同一条。
+      assert.equal(infos.some((item) => item.includes('[WARN]')), false, infos.join(' | '));
+      assert.ok(infos.some((item) => item.includes('mounted')), infos.join(' | '));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('宿主 logger 只有 info 没有 warn → 退回 info 但保留 [WARN] 前缀（绝不静默）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-warn2-'));
+    try {
+      /** @type {string[]} */
+      const infos = [];
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      apply(ctxWith(table, () => undefined, { info: (line) => infos.push(line) }), { dshHome: root });
+      const warnLines = infos.filter((line) => line.includes('[WARN]'));
+      assert.equal(warnLines.length, 1, infos.join(' | '));
+      assert.ok(warnLines[0].includes('宿主未提供 profileContext'), warnLines[0]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('走 profileContext 时不打回落警告（警告只在真降级时出现）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dshmcp-nowarn-'));
+    const desktop = join(root, 'profiles', 'desktop', 'cordis.patch.yml');
+    mkdirSync(join(root, 'profiles', 'desktop'), { recursive: true });
+    try {
+      /** @type {string[]} */
+      const warns = [];
+      /** @type {Array<{kind: string, path: string, handler: Function}>} */
+      const table = [];
+      apply(
+        ctxWith(
+          table,
+          (name) => (name === 'profileContext' ? { name: 'desktop', patchPath: desktop, home: root } : undefined),
+          { info: () => {}, warn: (line) => warns.push(line) },
+        ),
+        {},
+      );
+      assert.deepEqual(warns, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

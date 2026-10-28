@@ -4,14 +4,24 @@
  * cordis 层的 `config` 是用户手写的，写错不该让插件消失——所以
  * `normalizeConfig()` **永不抛错**，任何未知/非法值一律回落默认值。
  */
+import { isAbsolute } from 'node:path';
 
-/** @typedef {{ profile: string, backup: boolean, dshHome: string }} PluginConfig */
+/** @typedef {{ profile: string, backup: boolean, dshHome: string, patchFile: string }} PluginConfig */
 
 /**
- * 默认值。`dshHome` 为空串表示「未显式指定」，此时走 `$DSH_HOME` → `~/.dsh`。
+ * 默认值。
+ *
+ * - `dshHome` 为空串表示「未显式指定」，此时走宿主 `profileContext` → `$DSH_HOME` → `~/.dsh`；
+ * - `patchFile` 为空串表示「未显式指定到文件」，是给测试与高级用户的**最高优先级**
+ *   逃生门：正常运行永远走宿主给的 `profileContext.patchPath`。
  * @type {Readonly<PluginConfig>}
  */
-export const DEFAULT_CONFIG = Object.freeze({ profile: 'web', backup: true, dshHome: '' });
+export const DEFAULT_CONFIG = Object.freeze({
+  profile: 'web',
+  backup: true,
+  dshHome: '',
+  patchFile: '',
+});
 
 /** profile 名的合法形状：目录名，只允许安全字符。 */
 const PROFILE_RE = /^[A-Za-z0-9_-]{1,32}$/;
@@ -34,5 +44,14 @@ export function normalizeConfig(raw) {
     typeof source.dshHome === 'string' && source.dshHome.trim() !== ''
       ? source.dshHome.trim()
       : DEFAULT_CONFIG.dshHome;
-  return { profile, backup, dshHome };
+  // 显式文件路径：只接受**绝对路径**。相对路径会被 `resolve()` 解析成
+  // 「相对宿主 cwd」，那正是本 BUG 的同款陷阱（用户以为写到了 X，实际写到 Y），
+  // 所以宁可视为未设置，让它回落到宿主权威路径。
+  const patchFile =
+    typeof source.patchFile === 'string' &&
+    source.patchFile.trim() !== '' &&
+    isAbsolute(source.patchFile.trim())
+      ? source.patchFile.trim()
+      : DEFAULT_CONFIG.patchFile;
+  return { profile, backup, dshHome, patchFile };
 }

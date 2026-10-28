@@ -9,10 +9,22 @@
  *   （window.__ModuleLoader__.load）。React 由宿主通过 factory 的 require
  *   参数提供，绝不能打进 bundle——否则宿主会加载两份 React。
  *
- * `--check` 模式：全流程跑进临时目录、只校验不落盘，供 CI 门禁。
+ * `--check` 模式：全流程跑进临时目录、**再与现有 `lib/` 逐字节比对**——不一致就
+ * 非零退出。只"构建成功"不算通过：`lib/` 是入库产物（用户 `github:owner/repo`
+ * 安装时不执行构建），陈旧产物会被直接装上，所以门禁必须证明"仓库里的 lib/
+ * 就是现在这份 src/ 的产物"。
  */
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { build } from 'esbuild';
@@ -191,6 +203,59 @@ function assertValidateIsIsomorphic() {
   }
 }
 
+/**
+ * 把「现在这份 `src/` 的构建产物」与仓库里现有的 `lib/` 逐字节比对。
+ *
+ * 为什么必须有这一步：`lib/` 是入库产物，用户用 `github:owner/repo` 安装时
+ * 不执行构建。只证明"能构建成功"完全不代表"仓库里的 lib/ 就是这份 src/ 的
+ * 产物"——陈旧产物照样绿，然后被装上、带着旧 BUG 跑。
+ *
+ * 三类漂移分开报，因为它们对应的修法不同：
+ * - **内容不同**：最常见，改了代码没 build；
+ * - **缺失**：构建会产出但 lib/ 里没有；
+ * - **多余**：lib/ 里有、构建不再产出（模块改名/删除后的残骸）。
+ *
+ * @param {string} clientSource 本次构建出的 `lib/client.js` 全文。
+ * @returns {string[]} 漂移描述；空数组表示 `lib/` 与源码一致。
+ */
+function compareLib(clientSource) {
+  const libDir = join(root, 'lib');
+  /** @type {Map<string, Buffer>} 文件名 → 期望内容 */
+  const expected = new Map();
+  expected.set('client.js', Buffer.from(clientSource, 'utf8'));
+  for (const file of HOST_FILES) {
+    // Host 半是原样拷贝，所以期望内容就是 src/ 里的字节。
+    expected.set(file, readFileSync(join(root, 'src', file)));
+  }
+
+  const present = existsSync(libDir)
+    ? readdirSync(libDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => entry.name)
+        .sort()
+    : [];
+  if (present.length === 0) {
+    return [`缺失 lib/ 目录或为空（期望 ${expected.size} 个产物文件）`];
+  }
+
+  /** @type {string[]} */
+  const drift = [];
+  for (const [name, want] of expected) {
+    if (!present.includes(name)) {
+      drift.push(`缺失 lib/${name}`);
+      continue;
+    }
+    const actual = readFileSync(join(libDir, name));
+    if (!actual.equals(want)) {
+      drift.push(`内容不同 lib/${name}（lib 里 ${actual.length} bytes，重新构建应为 ${want.length} bytes）`);
+    }
+  }
+  for (const name of present) {
+    if (!expected.has(name)) drift.push(`多余 lib/${name}（现在的构建不再产出它）`);
+  }
+  return drift;
+}
+
 /** 主流程。 */
 async function main() {
   let workDir = root;
@@ -222,13 +287,30 @@ async function main() {
       checkSyntax(checkMode ? from : to);
     }
 
+    // 3) --check 的核心：产物必须与仓库里的 lib/ 逐字节一致。
+    //    没有这一步，门禁只能证明"代码能编译"，证明不了"入库产物是新的"。
+    if (checkMode) {
+      const drift = compareLib(clientSource);
+      if (drift.length > 0) {
+        throw new Error(
+          [
+            'lib/ 与当前 src/ 不一致 —— 仓库里的产物是陈旧的，请跑 `npm run build` 后再提交：',
+            ...drift.map((line) => `  - ${line}`),
+          ].join('\n'),
+        );
+      }
+    }
+
     const mode = checkMode ? 'check' : 'build';
     const clientBytes = Buffer.byteLength(clientSource, 'utf8');
     const budgetPercent = Math.round((clientBytes / MAX_CLIENT_BYTES) * 1000) / 10;
+    const verifyNote = checkMode
+      ? ` · lib/ verified (${HOST_FILES.length + 1} 个产物逐字节一致, temp dir removed)`
+      : '';
     console.log(
       `dsh-mcpserver-manager ${mode}: lib/client.js (${clientBytes} bytes = ${budgetPercent}% of the ` +
         `${MAX_CLIENT_BYTES}-byte budget, externals: ${externals.join(', ') || 'none'}) ` +
-        `+ ${HOST_FILES.length} host files${checkMode ? ' (temp dir, lib/ untouched)' : ''}`,
+        `+ ${HOST_FILES.length} host files${verifyNote}`,
     );
   } finally {
     if (tempDir !== null) rmSync(tempDir, { recursive: true, force: true });

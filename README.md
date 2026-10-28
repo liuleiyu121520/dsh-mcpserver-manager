@@ -9,17 +9,17 @@
 ## 它能做什么
 
 - **粘贴一段 JSON 就能接入**：弹窗里贴配置，输入即时校验，通过后才写盘，写完列表立刻回显并高亮 1.5 秒
-- **写入官方配置文件**：`~/.dsh/profiles/web/cordis.patch.yml`，按 `name: '@deepseek-ai/dsh-mcp-client'` 的官方条目格式插入，宿主 `patchReload: live` 自动热重载，**不用重启**
+- **写入官方配置文件**：写进**当前宿主 profile** 的 `cordis.patch.yml`（例如 desktop 宿主即 `~/.dsh/profiles/desktop/cordis.patch.yml`），按 `name: '@deepseek-ai/dsh-mcp-client'` 的官方条目格式插入，宿主 `patchReload: live` 自动热重载，**不用重启**
 - **绝不破坏你的配置文件**：受管段落 + 文本级行编辑 + 原子写 + `.bak` 备份 + 失败自动回滚，**段外一个字节都不动**
 - **前后端同一套校验规则**：前后端共用同一个 `src/validate.js`，前端判过的一定能过后端；JSON 语法错能报出「第 N 行第 M 列」
 - **env 脱敏**：列表与回显里只出现 `env` 的 key（`GITHUB_TOKEN ••••`），明文永不越过 Host 边界
 - **停用/启用可逆**：用 cordis 原生 `disabled: true`，停用后卡片置灰标「已停用」，再启用完整恢复（含 `env` 与 `!!js` 表达式）
 - **看得见别人写的 MCP**：用户手写或其它插件写入的条目也会列出来，归到「非本插件管理 · 只读」分组，只展示不改写
-- **零运行时依赖**：`dependencies` 为空，构建期只用一个 `esbuild`，客户端 bundle 约 37KB
+- **零运行时依赖**：`dependencies` 为空，构建期只用一个 `esbuild`，客户端 bundle 约 38KB
 
 ## 界面
 
-- **列表页**：标题行写明配置会写到哪里；每张卡片显示状态点、serverName、传输方式 chip、命令行（过长单行截断、悬浮看全量）、环境 key 与超时
+- **列表页**：标题行写明配置会写到哪里，**页头「写入位置」条直接显示当前实际写入的文件路径 + 当前 profile 名 + 这条路径是谁决定的**；每张卡片显示状态点、serverName、传输方式 chip、命令行（过长单行截断、悬浮看全量）、环境 key 与超时
 - **空态**：图标 + 主副文案 + 「添加 MCP」按钮——目标文件通常一条 MCP 都没有，空态是默认路径而不是异常
 - **添加弹窗**：等宽 JSON 编辑器 + 「填入示例 ▾」（stdio / streamable-http 两套）+ 实时错误区 + 写入位置提示
 - **三态齐备**：加载中骨架屏、空态、失败可重试 banner，不会出现「不知道是没数据还是没加载完」
@@ -65,7 +65,7 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 
 ## 用法
 
-1. 打开 **设置 → MCP 管理**
+1. 打开 **设置 → MCP 管理**（页面顶部「写入位置」条会显示当前实际写入的文件与 profile，可先核对一眼）
 2. 点 **添加 MCP**，在编辑器里粘贴一段配置（或点「填入示例 ▾」选一套模板改）
 3. 错误区为空后点 **确定** → 配置写入 → 列表刷新 → 新条目高亮
 4. 卡片上可直接 **停用 / 启用**；点 **⋯** 可 **删除**（二次确认）
@@ -115,7 +115,19 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 
 ## 写入位置与安全
 
-- **写入文件**：`$DSH_HOME/profiles/<profile>/cordis.patch.yml`，默认即 `~/.dsh/profiles/web/cordis.patch.yml`
+- **写入文件**：**当前宿主 profile** 的 patch 层。插件从宿主拿 `profileContext.patchPath`（cordis `Context` 上的权威字段，由 dsh 在启动 profile 时提供），所以 desktop 宿主写 `~/.dsh/profiles/desktop/cordis.patch.yml`、web 宿主写 `~/.dsh/profiles/web/cordis.patch.yml`——**加完就用得上，不会再出现「加了但工具没出现」**。
+- **页面顶部会显示当前实际写入路径**：设置页标题下方的「写入位置」条直接给出 `~/.dsh/profiles/<profile>/cordis.patch.yml`、当前 profile 名，以及这条路径的来源（宿主 `profileContext` / 显式配置 / `$DSH_HOME` / 默认值）。Host 日志同样会打出这一行：`mounted profile=desktop file=~/.dsh/profiles/desktop/cordis.patch.yml source=profileContext`。
+- **路径解析优先级**（第一个命中的胜出）：
+
+  | 顺序 | 来源 | 说明 |
+  |---|---|---|
+  | 1 | 插件配置 `patchFile`（绝对路径） | 精确指定到文件，测试与高级用户的逃生门；相对路径**被忽略** |
+  | 2 | 宿主 `profileContext.patchPath` | **正常运行走这条**，宿主说哪个 profile 就是哪个 |
+  | 3 | 插件配置 `dshHome` + `profiles/<profile>/` | 宿主未提供 `profileContext` 时（测试 / 独立进程） |
+  | 4 | `$DSH_HOME` + `profiles/<profile>/` | 同上 |
+  | 5 | `~/.dsh` + `profiles/<profile>/` | 兜底 |
+
+  空字符串或纯空白的 `$DSH_HOME` / `dshHome` 视为**未设置**（不会解析成当前工作目录）。
 - **受管段**：本插件只维护下面这段注释之间的内容，段外内容**一个字节都不改**：
 
   ```yaml
@@ -140,7 +152,8 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 - **手工恢复**：
 
   ```bash
-  cp ~/.dsh/profiles/web/cordis.patch.yml.bak ~/.dsh/profiles/web/cordis.patch.yml
+  # 把 <profile> 换成页面顶部「写入位置」条里显示的那个（例：desktop）
+  cp ~/.dsh/profiles/<profile>/cordis.patch.yml.bak ~/.dsh/profiles/<profile>/cordis.patch.yml
   ```
 
   只有一份 `.bak`（覆盖式），所以误操作两次后要尽快恢复。
@@ -154,11 +167,14 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `profile` | `web` | 要维护的 profile（`profiles/<profile>/`） |
+| `profile` | `web` | 宿主未提供 `profileContext` 时要维护的 profile（`profiles/<profile>/`）；**正常运行以宿主实际 profile 为准** |
 | `backup` | `true` | 写前是否落 `.bak` |
-| `dshHome` | 未设置 | 显式指定 DSH 根目录；优先级高于 `$DSH_HOME` |
+| `dshHome` | 未设置 | 显式指定 DSH 根目录；优先级高于 `$DSH_HOME`（低于宿主 `profileContext`） |
+| `patchFile` | 未设置 | 显式指定到**文件**的绝对路径，连宿主 `profileContext` 都能压过；相对路径被忽略 |
 
-路径解析优先级：**显式 `config.dshHome` > `$DSH_HOME` > `~/.dsh`**。空字符串或纯空白的 `$DSH_HOME` 视为**未设置**（不会解析成当前工作目录）。
+路径解析优先级：**`config.patchFile` > 宿主 `profileContext.patchPath` > `config.dshHome` > `$DSH_HOME` > `~/.dsh`**。空字符串或纯空白的 `$DSH_HOME` / `dshHome` 视为**未设置**（不会解析成当前工作目录）。
+
+想让某台机器强制维护另一个 profile（例如在 desktop 宿主里管理 web 的配置），用 `patchFile` 精确指到文件；只改 `profile` 在正常运行（宿主提供了 `profileContext`）时不生效——这是有意的：那正是「配置写到了宿主不读的文件里」这个 BUG 的成因。
 
 示例：
 
@@ -202,11 +218,11 @@ dsh plugin --profile <你的 profile> remove dsh-mcpserver-manager
 ```bash
 npm install          # 只装 esbuild（devDependency），运行时依赖为 0
 npm run build        # 生成 lib/index.js 与 lib/client.js
-npm run check        # 全流程跑进临时目录，只校验不落盘
+npm run check        # 构建到临时目录，并与仓库里的 lib/ 逐字节比对（有漂移即非零退出）
 npm test             # node:test，不需要任何测试框架
 ```
 
-`lib/` 是构建产物，本仓库的 `.gitignore` 里忽略它——**发布时由维护者在本地 `npm run build` 之后再把 `lib/` 带上**（DSH 直接读 `lib/index.js` 与 `lib/client.js`，仓库里没有产物就装不起来）。
+`lib/` 是构建产物，但**必须入库**（DSH 从 `github:owner/repo` 安装插件时不执行构建，仓库里没有 `lib/` 就装不起来）。所以 `npm run check` 不只"能构建成功"：它会把本次构建的产物与仓库里现有的 `lib/` 逐字节比对，缺文件、多文件、内容不同都会**非零退出**并点名漂移文件——「改了代码忘了 build，带着陈旧产物发版」正是它拦的情况。
 
 本地试用：
 

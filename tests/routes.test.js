@@ -1192,3 +1192,30 @@ describe('routes · legacy 上报与 POST /repair', () => {
     });
   });
 });
+
+describe('routes · route admission（dsh 0.2.2-rc.3 回归钉）', () => {
+  const source = readFileSync(new URL('../src/routes.js', import.meta.url), 'utf8');
+
+  // dsh 0.2.2-rc.3 起 `webServer.register` 默认 `auth: 'required'`：没声明的
+  // 路由在到达插件 handler 之前就被宿主判 503 `admission unavailable`（非
+  // JSON 体），前端解析不了 → 整个 MCP 列表空白（0.4.5 的真实报障）。这里
+  // 钉住注册点必须显式 anonymous，把准入交回包装里的 `rejected` 守卫。
+  it('唯一的 webServer.register 注册点显式声明 auth: anonymous', () => {
+    // 懒惰匹配到第一个 `}),`：handler 体内只会出现 `},`，所以第一个 `}),`
+    // 就是 register 调用自身的收尾——调用边界不依赖缩进。
+    const registrations = [...source.matchAll(/ctx\.webServer\.register\(\{[\s\S]*?\}\),/g)]
+      .map((match) => match[0]);
+    assert.equal(
+      registrations.length,
+      1,
+      '注册点必须恰好 1 处（全部路由走同一个 register 包装）；若新增了注册点，每处都要声明 anonymous',
+    );
+    for (const registration of registrations) {
+      assert.match(
+        registration,
+        /auth:\s*'anonymous'/,
+        `路由必须声明 auth: 'anonymous'，否则新版宿主默认 required 会返回 503：${registration.slice(0, 120)}`,
+      );
+    }
+  });
+});

@@ -2,8 +2,10 @@
  * HTTP 路由：`/api/dsh-mcpserver-manager/*` 的全部逻辑。
  *
  * 三条纪律：
- * 1. **每个 handler 的第一条语句是 `requestRejection` 守卫**（宿主安全契约，
- *    守卫写在统一的 `register()` 包装里，没有任何一条路由能绕过它）；
+ * 1. **每个 handler 的第一条语句是准入守卫**（`guard.js` 的 `rejectionFor`：
+ *    新版宿主 `connection.admit` 优先、旧版 `requestRejection` 兜底，无决策时
+ *    落结构性来源围栏，且任何路径都不抛异常。守卫写在统一的 `register()`
+ *    包装里，没有任何一条路由能绕过它）；
  * 2. 响应体一律走统一信封 `{ok:true,data,revision}` / `{ok:false,error:{...}}`，
  *    前端只需判 `ok` 一个字段；
  * 3. 日志只打 serverName / 错误码 / 路径，**永不打 `raw`、`env` 值**。
@@ -21,6 +23,7 @@
  * 版本检查那 4 条路由只在传入了 `updater` 时注册：没有更新器就干脆不存在这条
  * 路由（宿主回 404），好过挂一条永远 500 的端点。
  */
+import { rejectionFor } from './guard.js';
 import { checkServer } from './health.js';
 import { codedError } from './patch-store.js';
 import { catalogFor, countFor, toolServiceOf } from './tool-catalog.js';
@@ -67,15 +70,25 @@ export const STATUS_BY_CODE = Object.freeze({
 
 /**
  * 连接层准入检查。返回 true 表示请求已被拒、调用方应直接收尾。
+ *
+ * 决策全部委托给 `guard.js` 的 `rejectionFor`：双 API 兼容（新版宿主 `admit`
+ * 信封、旧版 `requestRejection` 裸状态码）+ 结构性来源围栏，且承诺任何路径都
+ * 不抛异常。硬拒时通过 logger 留一行诊断——只有固定字段，不带请求头或 URL
+ *（纪律 3）。
+ *
  * @param {object} ctx cordis 上下文。
  * @param {object} req 请求。
  * @param {object} res 响应。
+ * @param {(message: string) => void} logger 日志函数（可带 `warn` 通道）。
  * @returns {boolean} 是否已拒绝。
  */
-function rejected(ctx, req, res) {
-  const rejection = ctx.connection.requestRejection(req);
-  if (rejection !== undefined) {
-    res.statusCode = rejection;
+function rejected(ctx, req, res, logger) {
+  const status = rejectionFor(ctx, req, (decision) => {
+    const sink = typeof logger.warn === 'function' ? logger.warn : logger;
+    sink(`reject status=${decision.status} source=${decision.source} reason=${decision.reason}`);
+  });
+  if (status !== undefined) {
+    res.statusCode = status;
     res.end();
     return true;
   }
@@ -243,13 +256,23 @@ export function registerRoutes(ctx, store, logger = () => {}, options = {}) {
   const register = (kind, path, handler) =>
     ctx.effect(
       () =>
+        // dsh 0.2.2-rc.3 的 route admission migration：`webServer.register` 默认
+        // `auth: 'required'`，没声明的路由会在到达本插件 handler 之前被宿主判
+        // 503 `admission unavailable`（非 JSON 体）——前端 `response.json()`
+        // 解析失败，设置页整个列表空白。显式 anonymous 不是放宽鉴权：每个
+        // handler 的第一行仍是 `rejected` 守卫（`guard.js`，双 API 兼容 +
+        // 结构性围栏），这里只是把准入交回插件自己的检查，让它有机会执行。
         ctx.webServer.register({
           kind,
           path,
+          auth: 'anonymous',
           handler: async (req, res) => {
-            // 铁律：准入检查永远是第一件事。
-            if (rejected(ctx, req, res)) return;
             try {
+              // 铁律：准入检查永远是第一件事。guard.js 承诺守卫自身任何路径都
+              // 不抛异常；这层 try 是双保险——万一守卫真的抛了（宿主服务形状
+              // 再变），也走 handleError 的 JSON 信封，而不是漏到宿主兜底变成
+              // 400 空 body（0.4.5 报障的形态）。
+              if (rejected(ctx, req, res, logger)) return;
               await handler(req, res);
             } catch (error) {
               handleError(res, error, logger);
